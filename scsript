@@ -1,21 +1,31 @@
--- Базовый пример для поиска изменений в объектах
-local function highlightAnomalies()
-    -- Допустим, все объекты коридора лежат в папке "Level"
-    local levelFolder = workspace:FindFirstChild("Level") 
-    
-    if levelFolder then
-        for _, object in pairs(levelFolder:GetDescendants()) do
-            -- Проверяем специфические признаки аномалии
-            -- Например, если объект называется "Anomaly" или имеет странный тег
-            if object:IsA("BasePart") and object.Name == "Anomaly" then
-                local highlight = Instance.new("Highlight")
-                highlight.Parent = object
-                highlight.FillColor = Color3.fromRGB(255, 0, 0) -- Красный цвет
-                print("Аномалия найдена в объекте: " .. object.Name)
-            end
-        end
-    end
+local levelFolderName = "Level" -- Замени на реальное имя папки (посмотри в Dex)
+local targetFolder = workspace:FindFirstChild(levelFolderName)
+
+if not targetFolder then
+    print("Папка уровня не найдена! Проверь имя в Explorer.")
+    return
 end
 
--- Запуск проверки при входе в новый коридор
-highlightAnomalies()
+print("Сканер запущен. Ждем генерации коридора...")
+
+targetFolder.DescendantAdded:Connect(function(descendant)
+    -- Если в коридоре появляется новый объект (аномалия), подсвечиваем его
+    task.wait(0.5) -- Ждем, пока объект прогрузится
+    print("Внимание! Появился новый объект: " .. descendant.Name)
+    
+    if descendant:IsA("BasePart") then
+        local h = Instance.new("Highlight")
+        h.Parent = descendant
+        h.FillColor = Color3.fromRGB(255, 0, 255) -- Розовый для теста
+    end
+end)
+
+-- Проверка атрибутов (самый частый способ скрыть аномалию)
+task.spawn(function()
+    while task.wait(1) do
+        local attrs = targetFolder:GetAttributes()
+        for name, value in pairs(attrs) do
+            print("Атрибут уровня: " .. name .. " = " .. tostring(value))
+        end
+    end
+end)

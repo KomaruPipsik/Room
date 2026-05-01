@@ -1,0 +1,21 @@
+-- Базовый пример для поиска изменений в объектах
+local function highlightAnomalies()
+    -- Допустим, все объекты коридора лежат в папке "Level"
+    local levelFolder = workspace:FindFirstChild("Level") 
+    
+    if levelFolder then
+        for _, object in pairs(levelFolder:GetDescendants()) do
+            -- Проверяем специфические признаки аномалии
+            -- Например, если объект называется "Anomaly" или имеет странный тег
+            if object:IsA("BasePart") and object.Name == "Anomaly" then
+                local highlight = Instance.new("Highlight")
+                highlight.Parent = object
+                highlight.FillColor = Color3.fromRGB(255, 0, 0) -- Красный цвет
+                print("Аномалия найдена в объекте: " .. object.Name)
+            end
+        end
+    end
+end
+
+-- Запуск проверки при входе в новый коридор
+highlightAnomalies()

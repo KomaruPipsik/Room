@@ -1,31 +1,88 @@
-local levelFolderName = "Level" -- Замени на реальное имя папки (посмотри в Dex)
-local targetFolder = workspace:FindFirstChild(levelFolderName)
+-- Настройки
+local MapSegments = workspace:WaitForChild("MapSegments")
+local Player = game.Players.LocalPlayer
 
-if not targetFolder then
-    print("Папка уровня не найдена! Проверь имя в Explorer.")
-    return
+-- Черный список (этих объектов ВООБЩЕ не должно быть)
+local ForbiddenObjects = {
+    "ExtraCamera1", "ExtraCamera2", 
+    "PuddleSpawn1", "PuddleSpawn2", "PuddleSpawn3", "PuddleSpawn4", "PuddleSpawn5",
+    "ShadowSpawn1", "ShadowSpawn2",
+    -- Из твоих скриншотов
+    "AnomalyDoor", "BubblegumSpawn", "Camouflage", "CarnisSpawn", "Carnis_Voice",
+    "EletricPuddle", "Fog", "LockedCounter", "SCP096", "Spokesman", 
+    "SpokesmanBW1", "SpokesmanBW2", "SpokesmanTeleport", "Stalker",
+    "BloodPart", "Help"
+}
+
+-- Функция для уведомления (можно заменить на GUI)
+local function notifyAnomaly(text, obj)
+    print("!!! АНОМАЛИЯ ОБНАРУЖЕНА !!!")
+    print("Причина: " .. text)
+    if obj then
+        print("Объект: " .. obj:GetFullName())
+        -- Подсвечиваем аномалию, чтобы видеть сквозь стены
+        local h = Instance.new("Highlight")
+        h.Parent = obj
+        h.FillColor = Color3.fromRGB(255, 0, 0)
+    end
+    
+    -- Стандартное уведомление Roblox в углу экрана
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Anomaly Found!",
+        Text = text,
+        Duration = 5
+    })
 end
 
-print("Сканер запущен. Ждем генерации коридора...")
+local function scanMap()
+    for _, segment in pairs(MapSegments:GetChildren()) do
+        -- 1. Проверка на запрещенные объекты (по всему сегменту)
+        for _, name in pairs(ForbiddenObjects) do
+            local found = segment:FindFirstChild(name, true) -- Рекурсивный поиск
+            if found then
+                notifyAnomaly("Запрещенный объект: " .. name, found)
+            end
+        end
 
-targetFolder.DescendantAdded:Connect(function(descendant)
-    -- Если в коридоре появляется новый объект (аномалия), подсвечиваем его
-    task.wait(0.5) -- Ждем, пока объект прогрузится
-    print("Внимание! Появился новый объект: " .. descendant.Name)
-    
-    if descendant:IsA("BasePart") then
-        local h = Instance.new("Highlight")
-        h.Parent = descendant
-        h.FillColor = Color3.fromRGB(255, 0, 255) -- Розовый для теста
-    end
-end)
+        -- 2. Проверка NPC John (Debris)
+        local debris = segment:FindFirstChild("Debris")
+        if debris and debris:FindFirstChild("John") then
+            -- Если у Джона меняется прозрачность, размер или он двигается
+            -- Здесь можно добавить проверку свойств, если знаешь какие меняются
+        end
 
--- Проверка атрибутов (самый частый способ скрыть аномалию)
-task.spawn(function()
-    while task.wait(1) do
-        local attrs = targetFolder:GetAttributes()
-        for name, value in pairs(attrs) do
-            print("Атрибут уровня: " .. name .. " = " .. tostring(value))
+        -- 3. Проверка ламп (Lateral)
+        local lateral = segment:FindFirstChild("Lateral")
+        if lateral then
+            local lamps = lateral:FindFirstChild("Lamps")
+            -- Если лампы выключены или красные
+        end
+
+        -- 4. Проверка объектов (Objects)
+        local objects = segment:FindFirstChild("Objects")
+        if objects then
+            local items = {"CeilingExitSign", "Door1", "Door2", "Door3", "EyeClock", "TrashBin"}
+            for _, itemName in pairs(items) do
+                local item = objects:FindFirstChild(itemName)
+                if item then
+                    -- Проверяем на странные изменения (например, EyeClock повернут)
+                end
+            end
+        end
+        
+        -- 5. Проверка предметов из списка (скриншот 1)
+        local listFromPhoto = {"ArrowSign", "FlowersSign", "TrashSign", "Vent1", "WallDestroyEffect"}
+        for _, name in pairs(listFromPhoto) do
+            local p = segment:FindFirstChild(name, true)
+            if p then
+                 -- Если эти предметы появляются динамически - это аномалия
+            end
         end
     end
-end)
+end
+
+-- Запуск сканирования при нажатии кнопки или каждые 5 секунд
+print("Детектор аномалий запущен...")
+while task.wait(5) do
+    scanMap()
+end

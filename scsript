@@ -1,90 +1,124 @@
 -- Настройки
 local MapSegments = workspace:WaitForChild("MapSegments")
 local Player = game.Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
 
--- Создание Мини-Меню (ScreenGui)
+-- Создание Мини-Меню
 local gui = Instance.new("ScreenGui")
-gui.Name = "AnomalyDetectorGui"
+gui.Name = "AnomalyDetectorV2"
 gui.Parent = Player:WaitForChild("PlayerGui")
+gui.ResetOnSpawn = false
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 200, 0, 80)
+frame.Size = UDim2.new(0, 220, 0, 100)
 frame.Position = UDim2.new(0, 20, 0, 20)
-frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-frame.BorderSizePixel = 2
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+frame.BackgroundTransparency = 0.3
+frame.BorderSizePixel = 0
 frame.Parent = gui
 
+local uiCorner = Instance.new("UICorner")
+uiCorner.CornerRadius = ToolUnit.new(0, 8)
+uiCorner.Parent = frame
+
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 30)
-title.Text = "Детектор Аномалий"
+title.Size = UDim2.new(1, 0, 0, 40)
+title.Text = "АНАЛИЗАТОР СЕГМЕНТА"
 title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
 title.BackgroundTransparency = 1
 title.Parent = frame
 
 local counterLabel = Instance.new("TextLabel")
-counterLabel.Size = UDim2.new(1, 0, 0, 50)
-counterLabel.Position = UDim2.new(0, 0, 0, 30)
-counterLabel.Text = "Аномалий: 0"
-counterLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
-counterLabel.TextSize = 20
+counterLabel.Size = UDim2.new(1, 0, 0, 60)
+counterLabel.Position = UDim2.new(0, 0, 0, 40)
+counterLabel.Text = "Жду входа в сегмент..."
+counterLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+counterLabel.TextSize = 18
 counterLabel.BackgroundTransparency = 1
 counterLabel.Parent = frame
 
--- Функция для глубокого подсчета детей (включая все вложенные папки)
-local function countAllDescendants(parent)
-    return #parent:GetDescendants()
+-- Список имен объектов-аномалий из твоих фото и описания
+local AnomalyNames = {
+    "ExtraCamera1", "ExtraCamera2", "PuddleSpawn1", "PuddleSpawn2", "PuddleSpawn3", "PuddleSpawn4", "PuddleSpawn5",
+    "ShadowSpawn1", "ShadowSpawn2", "AnomalyDoor", "BubblegumSpawn", "Camouflage", "CarnisSpawn", "Carnis_Voice",
+    "EletricPuddle", "Fog", "LockedCounter", "SCP096", "Spokesman", "SpokesmanBW1", "SpokesmanBW2", "SpokesmanTeleport",
+    "Stalker", "BloodPart", "Help", "ArrowSign", "FlowersSign", "TrashSign", "WallDestroyEffect"
+}
+
+-- Функция для подсветки
+local function highlight(obj)
+    if not obj:FindFirstChild("AnomalyHighlight") then
+        local h = Instance.new("Highlight")
+        h.Name = "AnomalyHighlight"
+        h.FillColor = Color3.fromRGB(255, 0, 0)
+        h.OutlineColor = Color3.fromRGB(255, 255, 255)
+        h.FillTransparency = 0.5
+        h.Parent = obj
+    end
 end
 
--- Основная логика сравнения
-local function checkAnomalies()
-    local reference = MapSegments:FindFirstChild("Segment000")
-    if not reference then return end
+-- Функция поиска текущего сегмента игрока
+local function GetCurrentSegment()
+    local charPos = Character.PrimaryPart.Position
+    local closest = nil
+    local minDist = math.huge
 
-    local currentAnomalies = 0
-    
-    -- Получаем все сегменты, кроме эталонного
-    for _, segment in pairs(MapSegments:GetChildren()) do
-        if segment.Name ~= "Segment000" then
-            
-            -- 1. Сравнение общего количества объектов
-            local refCount = countAllDescendants(reference)
-            local curCount = countAllDescendants(segment)
-            
-            if curCount ~= refCount then
-                currentAnomalies = currentAnomalies + math.abs(curCount - refCount)
-            end
-
-            -- 2. Проверка специфических объектов, которые ты указал
-            -- Сравниваем папку References (PuddleSpawn, ShadowSpawn и т.д.)
-            local refRefs = reference:FindFirstChild("References")
-            local curRefs = segment:FindFirstChild("References")
-            
-            if refRefs and curRefs then
-                if countAllDescendants(curRefs) > countAllDescendants(refRefs) then
-                    currentAnomalies = currentAnomalies + 1
-                end
-            end
-
-            -- 3. Проверка лишних камер
-            if segment:FindFirstChild("ExtraCamera1", true) or segment:FindFirstChild("ExtraCamera2", true) then
-                currentAnomalies = currentAnomalies + 1
+    for _, seg in pairs(MapSegments:GetChildren()) do
+        if seg:IsA("Model") then
+            local dist = (seg:GetModelCFrame().Position - charPos).Magnitude
+            if dist < minDist then
+                minDist = dist
+                closest = seg
             end
         end
     end
+    return closest
+end
 
-    -- Обновление текста в меню
-    counterLabel.Text = "Аномалий: " .. tostring(currentAnomalies)
-    
-    -- Визуальный сигнал: если аномалий > 0, рамка светится красным
-    if currentAnomalies > 0 then
-        frame.BorderColor3 = Color3.new(1, 0, 0)
-    else
-        frame.BorderColor3 = Color3.new(0, 1, 0)
+-- Основной цикл
+task.spawn(function()
+    while task.wait(1) do
+        local currentSeg = GetCurrentSegment()
+        
+        if currentSeg then
+            local anomaliesCount = 0
+            
+            -- Если мы в Segment000, аномалий быть не должно по логике игры
+            if currentSeg.Name == "Segment000" then
+                counterLabel.Text = "Эталонный коридор (000)"
+                counterLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            else
+                -- Ищем аномалии по списку имен внутри текущего сегмента
+                for _, name in pairs(AnomalyNames) do
+                    local found = currentSeg:FindFirstChild(name, true)
+                    if found then
+                        anomaliesCount = anomaliesCount + 1
+                        highlight(found)
+                    end
+                end
+
+                -- Дополнительная проверка: если в папке References появилось что-то лишнее
+                local refs = currentSeg:FindFirstChild("References")
+                if refs then
+                    for _, child in pairs(refs:GetChildren()) do
+                        -- Если это парта или модель, которой нет в 000 (упрощенно)
+                        if child:IsA("BasePart") or child:IsA("Model") then
+                           -- Тут можно добавить более точное сравнение, но пока считаем по списку выше
+                        end
+                    end
+                end
+
+                counterLabel.Text = "Сегмент: " .. currentSeg.Name .. "\nАномалий: " .. anomaliesCount
+                
+                if anomaliesCount > 0 then
+                    counterLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+                else
+                    counterLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                end
+            end
+        end
     end
-end
+end)
 
--- Цикл проверки
-print("Система сравнения сегментов запущена...")
-while task.wait(2) do
-    checkAnomalies()
-end
+print("Скрипт версии 2.0 запущен (с ESP и локацией)")

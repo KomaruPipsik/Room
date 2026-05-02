@@ -1,124 +1,303 @@
--- Настройки
-local MapSegments = workspace:WaitForChild("MapSegments")
-local Player = game.Players.LocalPlayer
-local Character = Player.Character or Player.CharacterAdded:Wait()
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║           ANOMALY DETECTOR  —  LocalScript              ║
+-- ║   Помести этот файл в StarterPlayerScripts              ║
+-- ╚══════════════════════════════════════════════════════════╝
 
--- Создание Мини-Меню
-local gui = Instance.new("ScreenGui")
-gui.Name = "AnomalyDetectorV2"
-gui.Parent = Player:WaitForChild("PlayerGui")
-gui.ResetOnSpawn = false
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 220, 0, 100)
-frame.Position = UDim2.new(0, 20, 0, 20)
-frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-frame.BackgroundTransparency = 0.3
-frame.BorderSizePixel = 0
-frame.Parent = gui
+local player       = Players.LocalPlayer
+local camera       = workspace.CurrentCamera
 
-local uiCorner = Instance.new("UICorner")
-uiCorner.CornerRadius = ToolUnit.new(0, 8)
-uiCorner.Parent = frame
+-- ── Настройки ──────────────────────────────────────────────
+local SCAN_INTERVAL   = 1.5   -- секунды между сканированиями
+local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 40)
-title.Text = "АНАЛИЗАТОР СЕГМЕНТА"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.BackgroundTransparency = 1
-title.Parent = frame
-
-local counterLabel = Instance.new("TextLabel")
-counterLabel.Size = UDim2.new(1, 0, 0, 60)
-counterLabel.Position = UDim2.new(0, 0, 0, 40)
-counterLabel.Text = "Жду входа в сегмент..."
-counterLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-counterLabel.TextSize = 18
-counterLabel.BackgroundTransparency = 1
-counterLabel.Parent = frame
-
--- Список имен объектов-аномалий из твоих фото и описания
-local AnomalyNames = {
-    "ExtraCamera1", "ExtraCamera2", "PuddleSpawn1", "PuddleSpawn2", "PuddleSpawn3", "PuddleSpawn4", "PuddleSpawn5",
-    "ShadowSpawn1", "ShadowSpawn2", "AnomalyDoor", "BubblegumSpawn", "Camouflage", "CarnisSpawn", "Carnis_Voice",
-    "EletricPuddle", "Fog", "LockedCounter", "SCP096", "Spokesman", "SpokesmanBW1", "SpokesmanBW2", "SpokesmanTeleport",
-    "Stalker", "BloodPart", "Help", "ArrowSign", "FlowersSign", "TrashSign", "WallDestroyEffect"
+-- Объекты, которые сами по себе являются аномалией
+local ANOMALY_NAMES = {
+	AnomalyDoor      = true,
+	BubblegumSpawn   = true,
+	Camouflage       = true,
+	CarnisSpawn      = true,
+	EletricPuddle    = true,
+	Fog              = true,
+	SCP096           = true,
+	Stalker          = true,
+	BloodPart        = true,
+	Help             = true,
+	WallDestroyEffect= true,
+	ExtraCamera1     = true,
+	ExtraCamera2     = true,
 }
 
--- Функция для подсветки
-local function highlight(obj)
-    if not obj:FindFirstChild("AnomalyHighlight") then
-        local h = Instance.new("Highlight")
-        h.Name = "AnomalyHighlight"
-        h.FillColor = Color3.fromRGB(255, 0, 0)
-        h.OutlineColor = Color3.fromRGB(255, 255, 255)
-        h.FillTransparency = 0.5
-        h.Parent = obj
-    end
+-- Папки в References, само наличие детей в которых — аномалия
+local SPAWN_FOLDERS = { "PuddleSpawn", "ShadowSpawn" }
+
+-- ── Ссылки на мир ───────────────────────────────────────────
+local mapSegments = workspace:WaitForChild("MapSegments", 10)
+if not mapSegments then
+	warn("[AnomalyDetector] workspace.MapSegments не найден!")
+	return
 end
 
--- Функция поиска текущего сегмента игрока
-local function GetCurrentSegment()
-    local charPos = Character.PrimaryPart.Position
-    local closest = nil
-    local minDist = math.huge
-
-    for _, seg in pairs(MapSegments:GetChildren()) do
-        if seg:IsA("Model") then
-            local dist = (seg:GetModelCFrame().Position - charPos).Magnitude
-            if dist < minDist then
-                minDist = dist
-                closest = seg
-            end
-        end
-    end
-    return closest
+local reference = mapSegments:WaitForChild("Segment000", 10)
+if not reference then
+	warn("[AnomalyDetector] Segment000 не найден!")
+	return
 end
 
--- Основной цикл
-task.spawn(function()
-    while task.wait(1) do
-        local currentSeg = GetCurrentSegment()
-        
-        if currentSeg then
-            local anomaliesCount = 0
-            
-            -- Если мы в Segment000, аномалий быть не должно по логике игры
-            if currentSeg.Name == "Segment000" then
-                counterLabel.Text = "Эталонный коридор (000)"
-                counterLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-            else
-                -- Ищем аномалии по списку имен внутри текущего сегмента
-                for _, name in pairs(AnomalyNames) do
-                    local found = currentSeg:FindFirstChild(name, true)
-                    if found then
-                        anomaliesCount = anomaliesCount + 1
-                        highlight(found)
-                    end
-                end
+-- ── GUI ─────────────────────────────────────────────────────
+local function buildGui()
+	local playerGui = player:WaitForChild("PlayerGui")
 
-                -- Дополнительная проверка: если в папке References появилось что-то лишнее
-                local refs = currentSeg:FindFirstChild("References")
-                if refs then
-                    for _, child in pairs(refs:GetChildren()) do
-                        -- Если это парта или модель, которой нет в 000 (упрощенно)
-                        if child:IsA("BasePart") or child:IsA("Model") then
-                           -- Тут можно добавить более точное сравнение, но пока считаем по списку выше
-                        end
-                    end
-                end
+	-- Удаляем старый GUI если он уже есть (reload-safe)
+	local old = playerGui:FindFirstChild("AnomalyHUD")
+	if old then old:Destroy() end
 
-                counterLabel.Text = "Сегмент: " .. currentSeg.Name .. "\nАномалий: " .. anomaliesCount
-                
-                if anomaliesCount > 0 then
-                    counterLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
-                else
-                    counterLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                end
-            end
-        end
-    end
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name            = "AnomalyHUD"
+	screenGui.ResetOnSpawn    = false
+	screenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+	screenGui.Parent          = playerGui
+
+	-- Фоновая панель (правый нижний угол)
+	local frame = Instance.new("Frame")
+	frame.Name              = "Panel"
+	frame.Size              = UDim2.new(0, 260, 0, 80)
+	frame.Position          = UDim2.new(1, -275, 1, -100)
+	frame.BackgroundColor3  = Color3.fromRGB(8, 8, 12)
+	frame.BackgroundTransparency = 0.25
+	frame.BorderSizePixel   = 0
+	frame.Parent            = screenGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent       = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color     = Color3.fromRGB(200, 30, 30)
+	stroke.Thickness = 1.5
+	stroke.Parent    = frame
+
+	-- Заголовок
+	local title = Instance.new("TextLabel")
+	title.Name                  = "Title"
+	title.Size                  = UDim2.new(1, -12, 0, 22)
+	title.Position              = UDim2.new(0, 10, 0, 6)
+	title.BackgroundTransparency= 1
+	title.TextColor3            = Color3.fromRGB(220, 60, 60)
+	title.TextSize              = 13
+	title.Font                  = Enum.Font.GothamBold
+	title.TextXAlignment        = Enum.TextXAlignment.Left
+	title.Text                  = "⚠  ANOMALY DETECTOR"
+	title.Parent                = frame
+
+	-- Имя сегмента
+	local segLabel = Instance.new("TextLabel")
+	segLabel.Name                   = "SegmentLabel"
+	segLabel.Size                   = UDim2.new(1, -12, 0, 20)
+	segLabel.Position               = UDim2.new(0, 10, 0, 30)
+	segLabel.BackgroundTransparency = 1
+	segLabel.TextColor3             = Color3.fromRGB(210, 210, 210)
+	segLabel.TextSize               = 12
+	segLabel.Font                   = Enum.Font.Gotham
+	segLabel.TextXAlignment         = Enum.TextXAlignment.Left
+	segLabel.Text                   = "Сегмент: —"
+	segLabel.Parent                 = frame
+
+	-- Счётчик аномалий
+	local countLabel = Instance.new("TextLabel")
+	countLabel.Name                   = "CountLabel"
+	countLabel.Size                   = UDim2.new(1, -12, 0, 20)
+	countLabel.Position               = UDim2.new(0, 10, 0, 50)
+	countLabel.BackgroundTransparency = 1
+	countLabel.TextColor3             = Color3.fromRGB(210, 210, 210)
+	countLabel.TextSize               = 12
+	countLabel.Font                   = Enum.Font.Gotham
+	countLabel.TextXAlignment         = Enum.TextXAlignment.Left
+	countLabel.Text                   = "Аномалий: 0"
+	countLabel.Parent                 = frame
+
+	return screenGui
+end
+
+local gui          = buildGui()
+local segmentLabel = gui.Panel.SegmentLabel
+local countLabel   = gui.Panel.CountLabel
+
+-- ── Хелперы ─────────────────────────────────────────────────
+
+-- Получить позицию сегмента (центр его PrimaryPart или первого парта)
+local function getSegmentPosition(seg)
+	if seg.PrimaryPart then
+		return seg.PrimaryPart.Position
+	end
+	for _, v in ipairs(seg:GetDescendants()) do
+		if v:IsA("BasePart") then
+			return v.Position
+		end
+	end
+	return Vector3.new(0, 0, 0)
+end
+
+-- Найти ближайший к игроку сегмент
+local function getNearestSegment()
+	local char     = player.Character
+	if not char then return nil end
+	local rootPart = char:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return nil end
+
+	local nearest, nearestDist = nil, math.huge
+	for _, seg in ipairs(mapSegments:GetChildren()) do
+		if seg:IsA("Model") then
+			local dist = (rootPart.Position - getSegmentPosition(seg)).Magnitude
+			if dist < nearestDist then
+				nearest     = seg
+				nearestDist = dist
+			end
+		end
+	end
+	return nearest
+end
+
+-- Собрать плоский список имён дочерних объектов папки (1 уровень)
+local function childNameSet(parent)
+	local set = {}
+	for _, child in ipairs(parent:GetChildren()) do
+		set[child.Name] = true
+	end
+	return set
+end
+
+-- Добавить / обновить Highlight на объект
+local function highlightObject(obj)
+	-- Highlight должен лежать внутри объекта (BasePart или Model)
+	if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
+
+	local existing = obj:FindFirstChildOfClass("Highlight")
+	if existing then return end  -- уже подсвечен
+
+	local h = Instance.new("Highlight")
+	h.FillColor    = HIGHLIGHT_COLOR
+	h.OutlineColor = HIGHLIGHT_COLOR
+	h.FillTransparency    = 0.55
+	h.OutlineTransparency = 0
+	h.Adornee = obj
+	h.Parent  = obj
+end
+
+-- Убрать все Highlight-и, созданные нами, в сегменте
+local function clearHighlights(seg)
+	for _, h in ipairs(seg:GetDescendants()) do
+		if h:IsA("Highlight") then
+			h:Destroy()
+		end
+	end
+end
+
+-- ── Сравнение сегментов ─────────────────────────────────────
+
+--[[
+	Логика сравнения:
+	1. Для каждой известной папки (Debris, Lateral, Objects, References)
+	   собираем имена детей в эталоне и сравниваем с текущим сегментом.
+	2. Если имя объекта есть в ANOMALY_NAMES — аномалия.
+	3. Если в PuddleSpawn / ShadowSpawn есть любые дети — аномалия.
+	4. Если объект в текущем сегменте отсутствует в эталоне — аномалия.
+	   (т.е. сегмент содержит «лишние» объекты).
+--]]
+
+local KNOWN_FOLDERS = { "Debris", "Lateral", "Objects", "References" }
+
+local function compareFolders(refFolder, curFolder, anomalies)
+	if not refFolder or not curFolder then return end
+
+	local refNames = childNameSet(refFolder)
+
+	for _, child in ipairs(curFolder:GetChildren()) do
+		-- Проверка по «чёрному списку» имён
+		if ANOMALY_NAMES[child.Name] then
+			table.insert(anomalies, child)
+
+		-- Объект отсутствует в эталоне — лишний
+		elseif not refNames[child.Name] then
+			table.insert(anomalies, child)
+		end
+	end
+end
+
+local function checkSpawnFolders(curReferences, anomalies)
+	if not curReferences then return end
+	for _, folderName in ipairs(SPAWN_FOLDERS) do
+		local folder = curReferences:FindFirstChild(folderName)
+		if folder and #folder:GetChildren() > 0 then
+			-- Подсвечиваем саму папку и каждого её ребёнка
+			for _, child in ipairs(folder:GetChildren()) do
+				table.insert(anomalies, child)
+			end
+		end
+	end
+end
+
+local function scanSegment(seg)
+	local anomalies = {}
+	if seg == reference then return anomalies end  -- эталон не сканируем
+
+	for _, folderName in ipairs(KNOWN_FOLDERS) do
+		local refFolder = reference:FindFirstChild(folderName)
+		local curFolder = seg:FindFirstChild(folderName)
+		compareFolders(refFolder, curFolder, anomalies)
+	end
+
+	-- Отдельно — спавн-папки внутри References
+	local curRef = seg:FindFirstChild("References")
+	checkSpawnFolders(curRef, anomalies)
+
+	return anomalies
+end
+
+-- ── Главный цикл ────────────────────────────────────────────
+
+local lastSegment  = nil
+local lastScanTime = 0
+
+RunService.Heartbeat:Connect(function()
+	local now = tick()
+	if now - lastScanTime < SCAN_INTERVAL then return end
+	lastScanTime = now
+
+	local seg = getNearestSegment()
+	if not seg then return end
+
+	-- Если сменился сегмент — сбросить подсветку в старом
+	if lastSegment and lastSegment ~= seg then
+		clearHighlights(lastSegment)
+	end
+	lastSegment = seg
+
+	-- Обновить GUI
+	segmentLabel.Text = "Сегмент: " .. seg.Name
+
+	-- Сканируем
+	local anomalies = scanSegment(seg)
+
+	-- Убираем старые хайлайты в текущем сегменте перед перерисовкой
+	clearHighlights(seg)
+
+	-- Применяем новые хайлайты
+	for _, obj in ipairs(anomalies) do
+		highlightObject(obj)
+	end
+
+	-- Обновляем счётчик
+	local count = #anomalies
+	if count > 0 then
+		countLabel.Text      = "Аномалий: " .. count
+		countLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+	else
+		countLabel.Text       = "Аномалий: 0"
+		countLabel.TextColor3 = Color3.fromRGB(100, 220, 100)
+	end
 end)
 
-print("Скрипт версии 2.0 запущен (с ESP и локацией)")
+print("[AnomalyDetector] Скрипт запущен. Сканирование каждые", SCAN_INTERVAL, "сек.")

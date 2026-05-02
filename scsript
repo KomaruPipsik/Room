@@ -1,13 +1,14 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║          ANOMALY DETECTOR v3fix — LocalScript               ║
+-- ║          ANOMALY DETECTOR v3fix2 — LocalScript              ║
 -- ║   Помести в StarterPlayerScripts                            ║
 -- ╚══════════════════════════════════════════════════════════════╝
--- ИСПРАВЛЕНО v3fix (на базе v3, минимальные правки):
---   • Баг 1: Segment000 убран из IGNORE_SEGMENTS → теперь корректно показывает 000
---   • Баг 2: Spawn-папки сравниваются с эталоном из Segment000, а не флагают всё подряд
---   • Баг 4: Door3, EyeClock, ArrowSign2, Vent1Hidden убраны из ANOMALY_ON_APPEAR
---            (они присутствуют в нормальных сегментах)
---   • AnomalyCounter по-прежнему не трогается (строка в scanSeg)
+-- ИСПРАВЛЕНО v3fix2 (на базе v3fix):
+--   • WATCH_PART_NAMES дополнен всеми объектами со скрина
+--     (ArrowSign2, BloodPart, Help, Vent1Hidden, WallDestroyEffect)
+--   • BloodPart/Help/WallDestroyEffect убраны из ANOMALY_ON_APPEAR —
+--     они существуют нормально, их изменение = аномалия
+--   • addHighlight теперь ищет подходящий таргет для Model/Folder/etc
+--     (чинит подсветку BubblegumSpawn и подобных)
 -- ─────────────────────────────────────────────────────────────────
 
 local Players    = game:GetService("Players")
@@ -19,7 +20,8 @@ local SCAN_INTERVAL   = 1.5
 local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
 
 -- Объекты-аномалии: само появление = аномалия (глубокий поиск)
--- УБРАНЫ: Door3, EyeClock, ArrowSign2, Vent1Hidden — они есть в нормальных сегментах
+-- УБРАНЫ из appear: Door3, EyeClock, ArrowSign2, Vent1Hidden, BloodPart, Help, WallDestroyEffect
+-- — они существуют нормально; их изменение отслеживается через WATCH_PART_NAMES
 local ANOMALY_ON_APPEAR = {
     AnomalyDoor      = true,
     BubblegumSpawn   = true,
@@ -29,9 +31,6 @@ local ANOMALY_ON_APPEAR = {
     Fog              = true,
     SCP096           = true,
     Stalker          = true,
-    BloodPart        = true,
-    Help             = true,
-    WallDestroyEffect= true,
     ExtraCamera1     = true,
     ExtraCamera2     = true,
 }
@@ -40,13 +39,18 @@ local ANOMALY_ON_APPEAR = {
 local REQUIRED_OBJECTS = { "Camera1", "Camera2" }
 
 -- Парты, изменение ЦВЕТА которых = аномалия
--- (сравниваем только Color — меньше ложных срабатываний)
+-- Полный список со скрина (все BasePart-ы сегмента)
 local WATCH_PART_NAMES = {
     "ArrowSign",
-    "CameraFrame", "FlowersSign",
+    "ArrowSign2",
+    "BloodPart",
+    "CameraFrame",
+    "FlowersSign",
     "Frame1", "Frame2", "Frame3", "Frame4",
+    "Help",
     "TrashSign",
-    "Vent1", "Vent2",
+    "Vent1", "Vent1Hidden", "Vent2",
+    "WallDestroyEffect",
     "WallExitSign",
 }
 
@@ -317,14 +321,32 @@ local function getNearestSeg()
     return best
 end
 
--- Подсветка: НЕ ставится на полностью прозрачные BasePart-ы
+-- Подсветка: находим подходящий объект для Highlight.
+-- Highlight работает только с BasePart и Model.
+-- Если объект другого типа (Folder, Script...) — ищем BasePart среди потомков,
+-- или поднимаемся к предку-Model/BasePart.
+local function findHighlightTarget(obj)
+    if obj:IsA("BasePart") or obj:IsA("Model") then return obj end
+    for _, d in ipairs(obj:GetDescendants()) do
+        if d:IsA("BasePart") then return d end
+    end
+    local p = obj.Parent
+    while p and p ~= mapSegments do
+        if p:IsA("BasePart") or p:IsA("Model") then return p end
+        p = p.Parent
+    end
+    return nil
+end
+
 local function addHighlight(obj)
-    -- Для BasePart — пропускаем невидимые части
-    if obj:IsA("BasePart") and obj.Transparency >= 1 then return end
+    local target = findHighlightTarget(obj)
+    if not target then return end
+    -- Пропускаем полностью прозрачные BasePart-ы
+    if target:IsA("BasePart") and target.Transparency >= 1 then return end
     -- Для Model — пропускаем если все части прозрачны
-    if obj:IsA("Model") then
+    if target:IsA("Model") then
         local hasVisible = false
-        for _, p in ipairs(obj:GetDescendants()) do
+        for _, p in ipairs(target:GetDescendants()) do
             if p:IsA("BasePart") and p.Transparency < 1 then
                 hasVisible = true
                 break
@@ -332,14 +354,14 @@ local function addHighlight(obj)
         end
         if not hasVisible then return end
     end
-    if obj:FindFirstChildOfClass("Highlight") then return end
+    if target:FindFirstChildOfClass("Highlight") then return end
     local h              = Instance.new("Highlight")
     h.FillColor          = HIGHLIGHT_COLOR
     h.OutlineColor       = HIGHLIGHT_COLOR
     h.FillTransparency   = 0.55
     h.OutlineTransparency= 0
-    h.Adornee            = obj
-    h.Parent             = obj
+    h.Adornee            = target
+    h.Parent             = target
 end
 
 local function clearHighlights(seg)
@@ -496,4 +518,4 @@ RunService.Heartbeat:Connect(function()
         or  ""
 end)
 
-print("[AnomalyDetector v3fix] Запущен. Интервал:", SCAN_INTERVAL, "сек.")
+print("[AnomalyDetector v3fix2] Запущен. Интервал:", SCAN_INTERVAL, "сек.")

@@ -1,21 +1,47 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║          ANOMALY DETECTOR v4 — LocalScript                  ║
+-- ║          ANOMALY DETECTOR v5 — LocalScript                  ║
 -- ║   Помести в StarterPlayerScripts                            ║
 -- ╚══════════════════════════════════════════════════════════════╝
--- v4: Полностью переписана логика:
---   • Сравнение текущего сегмента с Segment000 по иерархическому пути
---   • Segment000 больше не игнорируется при определении позиции игрока
---   • Подсветка работает для любых типов объектов (Folder, Script, Decal и т.д.)
---   • Убраны списки ANOMALY_ON_APPEAR — они давали ложные срабатывания
+--
+-- Структура сегмента:
+--   Debris/       → NPC John (не трогаем)
+--   Lateral/      → Lamps (не трогаем)
+--   Objects/      → Camera1, Camera2, Door1, Door2, Door3,
+--                   CeilingExitSign, EyeClock, TrashBin
+--   References/   → PuddleSpawn/, ShadowSpawn/
+--
+-- Аномалии:
+--   1. В Objects/ появился объект, которого не было в Segment000
+--      (ExtraCamera1, ExtraCamera2 — частный случай этого)
+--   2. В PuddleSpawn/ или ShadowSpawn/ появились дети сверх эталона
+--   3. В сегменте появился объект из ANOMALY_NAMES (кроме Debris)
 -- ─────────────────────────────────────────────────────────────────
 
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local player     = Players.LocalPlayer
 
--- ┌─ Настройки ─────────────────────────────────────────────────┐
+-- ┌─ Настройки ──────────────────────────────────────────────────┐
 local SCAN_INTERVAL   = 1.5
 local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
+
+-- Объекты, само появление которых = аномалия (ищем везде кроме Debris)
+local ANOMALY_NAMES = {
+    AnomalyDoor       = true,
+    BubblegumSpawn    = true,
+    Camouflage        = true,
+    CarnisSpawn       = true,
+    EletricPuddle     = true,
+    Fog               = true,
+    SCP096            = true,
+    Stalker           = true,
+    BloodPart         = true,
+    Help              = true,
+    WallDestroyEffect = true,
+}
+
+-- Папки внутри References, появление лишних детей в которых = аномалия
+local SPAWN_FOLDERS = { "PuddleSpawn", "ShadowSpawn" }
 -- └─────────────────────────────────────────────────────────────┘
 
 -- ── Инициализация ──────────────────────────────────────────────
@@ -23,47 +49,40 @@ local mapSegments = workspace:WaitForChild("MapSegments", 10)
 if not mapSegments then
     warn("[AnomalyDetector] workspace.MapSegments не найден!") return
 end
+
 local reference = mapSegments:WaitForChild("Segment000", 10)
 if not reference then
     warn("[AnomalyDetector] Segment000 не найден!") return
 end
 
--- ── Снапшот ─────────────────────────────────────────────────────
--- Возвращает путь объекта относительно корня сегмента
--- Например: "Debris/John/Head" или "ArrowSign"
-local function getPath(obj, root)
-    local parts = {}
-    local cur = obj
-    while cur and cur ~= root do
-        table.insert(parts, 1, cur.Name)
-        cur = cur.Parent
-    end
-    return table.concat(parts, "/")
-end
-
--- Строит снапшот всех потомков модели:
--- path → { class, color?, texture?, shirt?, pants? }
-local function buildSnapshot(model)
-    local snap = {}
-    for _, obj in ipairs(model:GetDescendants()) do
-        local path  = getPath(obj, model)
-        local entry = { class = obj.ClassName }
-        if obj:IsA("BasePart") then
-            entry.color = obj.Color
-        elseif obj:IsA("Decal") or obj:IsA("Texture") then
-            entry.texture = obj.Texture
-        elseif obj:IsA("Shirt") then
-            entry.shirt = obj.ShirtTemplate
-        elseif obj:IsA("Pants") then
-            entry.pants = obj.PantsTemplate
+-- ── Снапшот эталона ────────────────────────────────────────────
+-- Запоминаем, какие имена есть в Objects/ у Segment000
+local refObjectNames = {}
+do
+    local objFolder = reference:FindFirstChild("Objects")
+    if objFolder then
+        for _, c in ipairs(objFolder:GetChildren()) do
+            refObjectNames[c.Name] = true
         end
-        snap[path] = entry
     end
-    return snap
 end
 
--- Снапшот Segment000 — эталон
-local refSnap = buildSnapshot(reference)
+-- Запоминаем, какие имена есть в каждой spawn-папке у Segment000
+local refSpawnNames = {}    -- refSpawnNames["PuddleSpawn"]["Part1"] = true
+do
+    local refRefs = reference:FindFirstChild("References")
+    if refRefs then
+        for _, folderName in ipairs(SPAWN_FOLDERS) do
+            refSpawnNames[folderName] = {}
+            local folder = refRefs:FindFirstChild(folderName)
+            if folder then
+                for _, c in ipairs(folder:GetChildren()) do
+                    refSpawnNames[folderName][c.Name] = true
+                end
+            end
+        end
+    end
+end
 
 -- ── GUI ────────────────────────────────────────────────────────
 local function buildGui()
@@ -79,8 +98,8 @@ local function buildGui()
 
     local frame = Instance.new("Frame")
     frame.Name                   = "Panel"
-    frame.Size                   = UDim2.new(0, 280, 0, 100)
-    frame.Position               = UDim2.new(1, -295, 1, -115)
+    frame.Size                   = UDim2.new(0, 280, 0, 80)
+    frame.Position               = UDim2.new(1, -295, 1, -95)
     frame.BackgroundColor3       = Color3.fromRGB(6, 6, 10)
     frame.BackgroundTransparency = 0.18
     frame.BorderSizePixel        = 0
@@ -110,7 +129,6 @@ local function buildGui()
     lbl("Title",    6,  Color3.fromRGB(220, 55, 55),  "⚠  ANOMALY DETECTOR", true)
     lbl("SegLabel", 30, Color3.fromRGB(195, 195, 195), "Сегмент: —",          false)
     lbl("CntLabel", 52, Color3.fromRGB(195, 195, 195), "Аномалий: 0",         false)
-    lbl("MisLabel", 74, Color3.fromRGB(255, 165, 50),  "",                    false)
 
     return sg
 end
@@ -119,7 +137,6 @@ local gui      = buildGui()
 local panel    = gui:WaitForChild("Panel")
 local segLabel = panel:WaitForChild("SegLabel")
 local cntLabel = panel:WaitForChild("CntLabel")
-local misLabel = panel:WaitForChild("MisLabel")
 
 -- ── Утилиты ────────────────────────────────────────────────────
 local function getSegPos(seg)
@@ -130,8 +147,6 @@ local function getSegPos(seg)
     return Vector3.zero
 end
 
--- Находит ближайший к игроку сегмент (включая Segment000,
--- исключая только Start — стартовую зону)
 local function getNearestSeg()
     local char = player.Character
     if not char then return nil end
@@ -148,20 +163,15 @@ local function getNearestSeg()
 end
 
 -- ── Подсветка ──────────────────────────────────────────────────
-
--- Ищем подходящий объект для Highlight:
 -- Highlight работает только с BasePart и Model.
--- Если объект другого типа — поднимаемся к предку-Model/BasePart.
-local function findHighlightTarget(obj)
-    if obj:IsA("BasePart") or obj:IsA("Model") then
-        return obj
-    end
-    -- Есть потомки-BasePart → создаём Model-контейнер нельзя,
-    -- просто берём первый BasePart среди потомков
+-- Для остальных типов поднимаемся к ближайшему подходящему предку.
+local function findTarget(obj)
+    if obj:IsA("BasePart") or obj:IsA("Model") then return obj end
+    -- Есть потомки-BasePart?
     for _, d in ipairs(obj:GetDescendants()) do
         if d:IsA("BasePart") then return d end
     end
-    -- Иначе поднимаемся к предку
+    -- Поднимаемся
     local p = obj.Parent
     while p and p ~= mapSegments do
         if p:IsA("BasePart") or p:IsA("Model") then return p end
@@ -171,24 +181,19 @@ local function findHighlightTarget(obj)
 end
 
 local function addHighlight(obj)
-    local target = findHighlightTarget(obj)
+    local target = findTarget(obj)
     if not target then return end
 
-    -- Пропускаем полностью прозрачные
     if target:IsA("BasePart") and target.Transparency >= 1 then return end
     if target:IsA("Model") then
-        local hasVisible = false
+        local vis = false
         for _, p in ipairs(target:GetDescendants()) do
-            if p:IsA("BasePart") and p.Transparency < 1 then
-                hasVisible = true; break
-            end
+            if p:IsA("BasePart") and p.Transparency < 1 then vis = true; break end
         end
-        if not hasVisible then return end
+        if not vis then return end
     end
 
-    -- Не дублируем
     if target:FindFirstChildOfClass("Highlight") then return end
-
     local h               = Instance.new("Highlight")
     h.FillColor           = HIGHLIGHT_COLOR
     h.OutlineColor        = HIGHLIGHT_COLOR
@@ -206,61 +211,48 @@ end
 
 -- ── Сканирование ───────────────────────────────────────────────
 local function scanSeg(seg)
-    local anomObjs = {}  -- объекты для подсветки
-    local missing  = {}  -- имена пропавших объектов
+    local anomObjs = {}
 
-    -- Строим снапшот текущего сегмента
-    local curSnap = {}
+    local debris = seg:FindFirstChild("Debris")
+
+    -- ① Объекты из чёрного списка ANOMALY_NAMES
+    --    Ищем везде в сегменте, кроме папки Debris (там John — NPC, не трогаем)
     for _, obj in ipairs(seg:GetDescendants()) do
-        local path  = getPath(obj, seg)
-        local entry = { class = obj.ClassName, obj = obj }
-        if obj:IsA("BasePart") then
-            entry.color = obj.Color
-        elseif obj:IsA("Decal") or obj:IsA("Texture") then
-            entry.texture = obj.Texture
-        elseif obj:IsA("Shirt") then
-            entry.shirt = obj.ShirtTemplate
-        elseif obj:IsA("Pants") then
-            entry.pants = obj.PantsTemplate
-        end
-        curSnap[path] = entry
-    end
-
-    -- ① Появилось или изменилось по сравнению с Segment000
-    for path, cur in pairs(curSnap) do
-        local ref = refSnap[path]
-        if ref == nil then
-            -- Объект появился — его не было в Segment000
-            table.insert(anomObjs, cur.obj)
-        else
-            -- Объект есть в обоих — проверяем изменения
-            local changed = false
-            if cur.color   and ref.color   and cur.color   ~= ref.color   then changed = true end
-            if cur.texture and ref.texture and cur.texture ~= ref.texture then changed = true end
-            if cur.shirt   and ref.shirt   and cur.shirt   ~= ref.shirt   then changed = true end
-            if cur.pants   and ref.pants   and cur.pants   ~= ref.pants   then changed = true end
-            if changed then
-                table.insert(anomObjs, cur.obj)
+        if ANOMALY_NAMES[obj.Name] then
+            if not (debris and obj:IsDescendantOf(debris)) then
+                table.insert(anomObjs, obj)
             end
         end
     end
 
-    -- ② Пропало по сравнению с Segment000
-    -- Добавляем только "корневые" пропавшие объекты
-    -- (не добавляем потомков пропавшего родителя — они и так учтены)
-    for path, _ in pairs(refSnap) do
-        if curSnap[path] == nil then
-            -- Проверяем — не пропал ли уже родитель
-            local parentPath = path:match("^(.+)/[^/]+$")
-            local parentAlsoMissing = parentPath and (curSnap[parentPath] == nil)
-            if not parentAlsoMissing then
-                local name = path:match("([^/]+)$") or path
-                table.insert(missing, name)
+    -- ② Objects/ — лишние объекты сверх эталона
+    --    (ExtraCamera1, ExtraCamera2 попадают сюда автоматически)
+    local objFolder = seg:FindFirstChild("Objects")
+    if objFolder then
+        for _, c in ipairs(objFolder:GetChildren()) do
+            if not refObjectNames[c.Name] then
+                table.insert(anomObjs, c)
             end
         end
     end
 
-    return anomObjs, missing
+    -- ③ References/PuddleSpawn и ShadowSpawn — лишние дети сверх эталона
+    local refs = seg:FindFirstChild("References")
+    if refs then
+        for _, folderName in ipairs(SPAWN_FOLDERS) do
+            local folder    = refs:FindFirstChild(folderName)
+            local refNames  = refSpawnNames[folderName] or {}
+            if folder then
+                for _, c in ipairs(folder:GetChildren()) do
+                    if not refNames[c.Name] then
+                        table.insert(anomObjs, c)
+                    end
+                end
+            end
+        end
+    end
+
+    return anomObjs
 end
 
 -- ── Главный цикл ───────────────────────────────────────────────
@@ -277,11 +269,9 @@ RunService.Heartbeat:Connect(function()
     if not seg then
         segLabel.Text = "Сегмент: не найден"
         cntLabel.Text = "Аномалий: —"
-        misLabel.Text = ""
         return
     end
 
-    -- Сбрасываем подсветку при смене зоны
     if lastSeg and lastSeg ~= seg then
         clearHighlights(lastSeg)
     end
@@ -289,40 +279,25 @@ RunService.Heartbeat:Connect(function()
 
     segLabel.Text = "Сегмент: " .. seg.Name
 
-    -- Segment000 — эталон, не сканируем
+    -- Segment000 — эталон, сканировать нет смысла
     if seg == reference then
         cntLabel.Text       = "Аномалий: 0"
         cntLabel.TextColor3 = Color3.fromRGB(90, 215, 90)
-        misLabel.Text       = ""
         return
     end
 
-    local anomObjs, missList = scanSeg(seg)
+    local anomObjs = scanSeg(seg)
 
-    -- Перерисовываем подсветку
     clearHighlights(seg)
     for _, obj in ipairs(anomObjs) do
         addHighlight(obj)
     end
 
-    -- Обновляем GUI
-    local total = #anomObjs + #missList
+    local total = #anomObjs
     cntLabel.Text       = "Аномалий: " .. total
     cntLabel.TextColor3 = total > 0
         and Color3.fromRGB(255, 75, 75)
         or  Color3.fromRGB(90, 215, 90)
-
-    -- Показываем не более 3 пропавших объектов чтобы не переполнять GUI
-    if #missList > 0 then
-        local shown = {}
-        for i = 1, math.min(3, #missList) do
-            table.insert(shown, missList[i])
-        end
-        local suffix = #missList > 3 and (" и ещё " .. (#missList - 3)) or ""
-        misLabel.Text = "Нет: " .. table.concat(shown, ", ") .. suffix
-    else
-        misLabel.Text = ""
-    end
 end)
 
-print("[AnomalyDetector v4] Запущен. Интервал:", SCAN_INTERVAL, "сек.")
+print("[AnomalyDetector v5] Запущен. Интервал:", SCAN_INTERVAL, "сек.")

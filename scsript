@@ -1,14 +1,16 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║          ANOMALY DETECTOR v3fix2 — LocalScript              ║
+-- ║          ANOMALY DETECTOR v3fix3 — LocalScript              ║
 -- ║   Помести в StarterPlayerScripts                            ║
 -- ╚══════════════════════════════════════════════════════════════╝
--- ИСПРАВЛЕНО v3fix2 (на базе v3fix):
---   • WATCH_PART_NAMES дополнен всеми объектами со скрина
---     (ArrowSign2, BloodPart, Help, Vent1Hidden, WallDestroyEffect)
---   • BloodPart/Help/WallDestroyEffect убраны из ANOMALY_ON_APPEAR —
---     они существуют нормально, их изменение = аномалия
---   • addHighlight теперь ищет подходящий таргет для Model/Folder/etc
---     (чинит подсветку BubblegumSpawn и подобных)
+-- ИСПРАВЛЕНО v3fix3:
+--   ПОЯВЛЕНИЕ → аномалия: Bubblegum, BrokenLight, CeilingExitSign,
+--       Door3, EyeClock, ExtraCamera1/2, ArrowSign2, BloodPart
+--   ОТСУТСТВИЕ → аномалия: TrashBin, CameraFrame, FlowersSign,
+--       Frame1-4, TrashSign, Camera1, Camera2
+--   ЦВЕТ → TrashBin (норма 99,95,98), Door1, Door2
+--   ВРАЩЕНИЕ → ArrowSign, FlowersSign, Frame1-4, Door1, Door2
+--   РАЗМЕР → CameraFrame (норма 0.2627, 2.7991, 3.4168)
+--   AnomalyCounter — НИКОГДА не трогаем
 -- ─────────────────────────────────────────────────────────────────
 
 local Players    = game:GetService("Players")
@@ -20,9 +22,18 @@ local SCAN_INTERVAL   = 1.5
 local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
 
 -- Объекты-аномалии: само появление = аномалия (глубокий поиск)
--- УБРАНЫ из appear: Door3, EyeClock, ArrowSign2, Vent1Hidden, BloodPart, Help, WallDestroyEffect
--- — они существуют нормально; их изменение отслеживается через WATCH_PART_NAMES
 local ANOMALY_ON_APPEAR = {
+    -- Указаны явно
+    Bubblegum       = true,
+    BrokenLight     = true,
+    CeilingExitSign = true,
+    Door3           = true,
+    EyeClock        = true,
+    ExtraCamera1    = true,
+    ExtraCamera2    = true,
+    ArrowSign2      = true,
+    BloodPart       = true,
+    -- Прочие известные аномальные объекты
     AnomalyDoor      = true,
     BubblegumSpawn   = true,
     Camouflage       = true,
@@ -31,28 +42,38 @@ local ANOMALY_ON_APPEAR = {
     Fog              = true,
     SCP096           = true,
     Stalker          = true,
-    ExtraCamera1     = true,
-    ExtraCamera2     = true,
 }
 
 -- Объекты, которые ОБЯЗАНЫ существовать; отсутствие = аномалия
-local REQUIRED_OBJECTS = { "Camera1", "Camera2" }
-
--- Парты, изменение ЦВЕТА которых = аномалия
--- Полный список со скрина (все BasePart-ы сегмента)
-local WATCH_PART_NAMES = {
-    "ArrowSign",
-    "ArrowSign2",
-    "BloodPart",
+local REQUIRED_OBJECTS = {
+    "Camera1", "Camera2",
+    "TrashBin",
     "CameraFrame",
-    "FlowersSign",
-    "Frame1", "Frame2", "Frame3", "Frame4",
-    "Help",
+    "FlowersSign", "Frame1", "Frame2", "Frame3", "Frame4",
     "TrashSign",
-    "Vent1", "Vent1Hidden", "Vent2",
-    "WallDestroyEffect",
-    "WallExitSign",
 }
+
+-- Парты, изменение ЦВЕТА которых = аномалия (сравниваем с Segment000)
+local WATCH_PART_NAMES = {
+    "TrashBin",   -- норма RGB(99, 95, 98)
+    "Door1", "Door2",
+}
+
+-- Парты, изменение ВРАЩЕНИЯ которых = аномалия (сравниваем с Segment000)
+local WATCH_ROTATION = {
+    "ArrowSign",
+    "FlowersSign", "Frame1", "Frame2", "Frame3", "Frame4",
+    "Door1", "Door2",
+}
+
+-- Парты, изменение РАЗМЕРА которых = аномалия
+local WATCH_SIZE = {
+    -- CameraFrame, нормальный размер (X, Y, Z):
+    { name = "CameraFrame", size = Vector3.new(0.2627061903476715, 2.7990925312042236, 3.4167513847351074) },
+}
+
+local ROT_EPS  = 0.5   -- допуск вращения, градусы
+local SIZE_EPS = 0.01  -- допуск размера, студы
 
 -- Spawn-папки: любые дети внутри = аномалия
 local SPAWN_FOLDERS = { "PuddleSpawn", "ShadowSpawn" }
@@ -74,14 +95,29 @@ end
 
 -- ── Снапшоты ───────────────────────────────────────────────────
 
--- Снапшот BasePart (только цвет — главный признак визуальной аномалии)
+-- Снапшот BasePart: цвет + вращение
 local function snapPart(part)
     if not part:IsA("BasePart") then return nil end
-    return { Color = part.Color }
+    return { Color = part.Color, Orientation = part.Orientation }
 end
 
 local function partColorChanged(part, snap)
     return snap ~= nil and part.Color ~= snap.Color
+end
+
+local function partRotationChanged(part, snap)
+    if not snap then return false end
+    local o, r = part.Orientation, snap.Orientation
+    return math.abs(o.X - r.X) > ROT_EPS
+        or math.abs(o.Y - r.Y) > ROT_EPS
+        or math.abs(o.Z - r.Z) > ROT_EPS
+end
+
+local function partSizeChanged(part, normalSize)
+    local s = part.Size
+    return math.abs(s.X - normalSize.X) > SIZE_EPS
+        or math.abs(s.Y - normalSize.Y) > SIZE_EPS
+        or math.abs(s.Z - normalSize.Z) > SIZE_EPS
 end
 
 -- Снапшот всей модели: цвета всех BasePart-потомков + количество
@@ -188,8 +224,12 @@ local refFaceSnap   = nil -- { Texture }
 local refNPCSnap    = nil -- внешность John
 
 local function buildSnapshots()
-    -- Наблюдаемые парты
-    for _, name in ipairs(WATCH_PART_NAMES) do
+    -- Наблюдаемые парты (цвет + вращение)
+    local watchAll = {}
+    for _, n in ipairs(WATCH_PART_NAMES) do watchAll[n] = true end
+    for _, n in ipairs(WATCH_ROTATION)   do watchAll[n] = true end
+
+    for name in pairs(watchAll) do
         local p = reference:FindFirstChild(name, true)
         if p and p:IsA("BasePart") then
             refPartSnaps[name] = snapPart(p)
@@ -421,7 +461,26 @@ local function scanSeg(seg)
         end
     end
 
-    -- ⑤ John → Case: изменение = аномалия (подсвечиваем Case, не John)
+    -- ⑤ Изменение ВРАЩЕНИЯ = аномалия
+    for _, name in ipairs(WATCH_ROTATION) do
+        local snap = refPartSnaps[name]
+        if snap then
+            local part = seg:FindFirstChild(name, true)
+            if part and part:IsA("BasePart") and partRotationChanged(part, snap) then
+                table.insert(flagged, part)
+            end
+        end
+    end
+
+    -- ⑥ Изменение РАЗМЕРА = аномалия
+    for _, entry in ipairs(WATCH_SIZE) do
+        local part = seg:FindFirstChild(entry.name, true)
+        if part and part:IsA("BasePart") and partSizeChanged(part, entry.size) then
+            table.insert(flagged, part)
+        end
+    end
+
+    -- ⑦ John → Case / Face / костюм
     local debris = seg:FindFirstChild("Debris")
     if debris then
         local john = debris:FindFirstChild("John")
@@ -518,4 +577,4 @@ RunService.Heartbeat:Connect(function()
         or  ""
 end)
 
-print("[AnomalyDetector v3fix2] Запущен. Интервал:", SCAN_INTERVAL, "сек.")
+print("[AnomalyDetector v3fix3] Запущен. Интервал:", SCAN_INTERVAL, "сек.")

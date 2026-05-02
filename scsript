@@ -1,47 +1,61 @@
 -- ╔══════════════════════════════════════════════════════════════╗
--- ║          ANOMALY DETECTOR v5 — LocalScript                  ║
+-- ║          ANOMALY DETECTOR v3fix — LocalScript               ║
 -- ║   Помести в StarterPlayerScripts                            ║
 -- ╚══════════════════════════════════════════════════════════════╝
---
--- Структура сегмента:
---   Debris/       → NPC John (не трогаем)
---   Lateral/      → Lamps (не трогаем)
---   Objects/      → Camera1, Camera2, Door1, Door2, Door3,
---                   CeilingExitSign, EyeClock, TrashBin
---   References/   → PuddleSpawn/, ShadowSpawn/
---
--- Аномалии:
---   1. В Objects/ появился объект, которого не было в Segment000
---      (ExtraCamera1, ExtraCamera2 — частный случай этого)
---   2. В PuddleSpawn/ или ShadowSpawn/ появились дети сверх эталона
---   3. В сегменте появился объект из ANOMALY_NAMES (кроме Debris)
+-- ИСПРАВЛЕНО v3fix (на базе v3, минимальные правки):
+--   • Баг 1: Segment000 убран из IGNORE_SEGMENTS → теперь корректно показывает 000
+--   • Баг 2: Spawn-папки сравниваются с эталоном из Segment000, а не флагают всё подряд
+--   • Баг 4: Door3, EyeClock, ArrowSign2, Vent1Hidden убраны из ANOMALY_ON_APPEAR
+--            (они присутствуют в нормальных сегментах)
+--   • AnomalyCounter по-прежнему не трогается (строка в scanSeg)
 -- ─────────────────────────────────────────────────────────────────
 
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local player     = Players.LocalPlayer
 
--- ┌─ Настройки ──────────────────────────────────────────────────┐
+-- ┌─ Настройки ─────────────────────────────────────────────────┐
 local SCAN_INTERVAL   = 1.5
 local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
 
--- Объекты, само появление которых = аномалия (ищем везде кроме Debris)
-local ANOMALY_NAMES = {
-    AnomalyDoor       = true,
-    BubblegumSpawn    = true,
-    Camouflage        = true,
-    CarnisSpawn       = true,
-    EletricPuddle     = true,
-    Fog               = true,
-    SCP096            = true,
-    Stalker           = true,
-    BloodPart         = true,
-    Help              = true,
-    WallDestroyEffect = true,
+-- Объекты-аномалии: само появление = аномалия (глубокий поиск)
+-- УБРАНЫ: Door3, EyeClock, ArrowSign2, Vent1Hidden — они есть в нормальных сегментах
+local ANOMALY_ON_APPEAR = {
+    AnomalyDoor      = true,
+    BubblegumSpawn   = true,
+    Camouflage       = true,
+    CarnisSpawn      = true,
+    EletricPuddle    = true,
+    Fog              = true,
+    SCP096           = true,
+    Stalker          = true,
+    BloodPart        = true,
+    Help             = true,
+    WallDestroyEffect= true,
+    ExtraCamera1     = true,
+    ExtraCamera2     = true,
 }
 
--- Папки внутри References, появление лишних детей в которых = аномалия
+-- Объекты, которые ОБЯЗАНЫ существовать; отсутствие = аномалия
+local REQUIRED_OBJECTS = { "Camera1", "Camera2" }
+
+-- Парты, изменение ЦВЕТА которых = аномалия
+-- (сравниваем только Color — меньше ложных срабатываний)
+local WATCH_PART_NAMES = {
+    "ArrowSign",
+    "CameraFrame", "FlowersSign",
+    "Frame1", "Frame2", "Frame3", "Frame4",
+    "TrashSign",
+    "Vent1", "Vent2",
+    "WallExitSign",
+}
+
+-- Spawn-папки: любые дети внутри = аномалия
 local SPAWN_FOLDERS = { "PuddleSpawn", "ShadowSpawn" }
+
+-- Сегменты, которые пропускаются при поиске ближайшего
+-- Segment000 убран — теперь он корректно показывается когда игрок рядом
+local IGNORE_SEGMENTS = { Start = true }
 -- └─────────────────────────────────────────────────────────────┘
 
 -- ── Инициализация ──────────────────────────────────────────────
@@ -49,35 +63,172 @@ local mapSegments = workspace:WaitForChild("MapSegments", 10)
 if not mapSegments then
     warn("[AnomalyDetector] workspace.MapSegments не найден!") return
 end
-
 local reference = mapSegments:WaitForChild("Segment000", 10)
 if not reference then
     warn("[AnomalyDetector] Segment000 не найден!") return
 end
 
--- ── Снапшот эталона ────────────────────────────────────────────
--- Запоминаем, какие имена есть в Objects/ у Segment000
-local refObjectNames = {}
-do
-    local objFolder = reference:FindFirstChild("Objects")
-    if objFolder then
-        for _, c in ipairs(objFolder:GetChildren()) do
-            refObjectNames[c.Name] = true
+-- ── Снапшоты ───────────────────────────────────────────────────
+
+-- Снапшот BasePart (только цвет — главный признак визуальной аномалии)
+local function snapPart(part)
+    if not part:IsA("BasePart") then return nil end
+    return { Color = part.Color }
+end
+
+local function partColorChanged(part, snap)
+    return snap ~= nil and part.Color ~= snap.Color
+end
+
+-- Снапшот всей модели: цвета всех BasePart-потомков + количество
+local function snapModel(model)
+    local s = { _count = 0 }
+    for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("BasePart") then
+            s._count  += 1
+            s[d.Name]  = d.Color
+        end
+    end
+    return s
+end
+
+local function modelChanged(model, snap)
+    if not snap then return false end
+    local count = 0
+    for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("BasePart") then
+            count += 1
+            if snap[d.Name] and d.Color ~= snap[d.Name] then return true end
+        end
+    end
+    return count ~= snap._count
+end
+
+-- Снапшот внешности NPC John
+-- Проверяем: цвета частей тела, Shirt, Pants, кол-во Accessory
+local function snapNPCAppearance(john)
+    local s = {
+        bodyColors  = {},
+        shirt       = "",
+        pants       = "",
+        accessories = {},
+    }
+    -- Цвета прямых BasePart-детей (голова, торс, руки, ноги)
+    for _, part in ipairs(john:GetChildren()) do
+        if part:IsA("BasePart") then
+            s.bodyColors[part.Name] = part.Color
+        end
+    end
+    -- Рубашка / штаны
+    local shirt = john:FindFirstChildOfClass("Shirt")
+    local pants  = john:FindFirstChildOfClass("Pants")
+    if shirt then s.shirt = shirt.ShirtTemplate end
+    if pants  then s.pants = pants.PantsTemplate  end
+    -- Количество аксессуаров и их имена
+    for _, child in ipairs(john:GetChildren()) do
+        if child:IsA("Accessory") then
+            s.accessories[child.Name] = true
+        end
+    end
+    return s
+end
+
+-- Возвращает первую изменившуюся часть тела (для подсветки) или nil
+local function npcAppearanceChanged(john, snap)
+    if not snap then return nil end
+
+    -- Цвета тела
+    for _, part in ipairs(john:GetChildren()) do
+        if part:IsA("BasePart") then
+            local refColor = snap.bodyColors[part.Name]
+            if refColor and part.Color ~= refColor then
+                return part  -- подсвечиваем конкретную часть
+            end
+        end
+    end
+
+    -- Рубашка
+    local shirt = john:FindFirstChildOfClass("Shirt")
+    local curShirt = shirt and shirt.ShirtTemplate or ""
+    if curShirt ~= snap.shirt then
+        -- Подсвечиваем торс (или Head если торса нет)
+        return john:FindFirstChild("Torso")
+            or john:FindFirstChild("UpperTorso")
+            or john:FindFirstChild("Head")
+    end
+
+    -- Штаны
+    local pants = john:FindFirstChildOfClass("Pants")
+    local curPants = pants and pants.PantsTemplate or ""
+    if curPants ~= snap.pants then
+        return john:FindFirstChild("Torso")
+            or john:FindFirstChild("LowerTorso")
+            or john:FindFirstChild("Head")
+    end
+
+    -- Аксессуары: появился новый
+    for _, child in ipairs(john:GetChildren()) do
+        if child:IsA("Accessory") and not snap.accessories[child.Name] then
+            return child
+        end
+    end
+
+    return nil
+end
+
+-- ── Сборка всех снапшотов из Segment000 ───────────────────────
+
+local refPartSnaps  = {}  -- [partName] = snap
+local refCaseSnap   = nil
+local refFaceSnap   = nil -- { Texture }
+local refNPCSnap    = nil -- внешность John
+
+local function buildSnapshots()
+    -- Наблюдаемые парты
+    for _, name in ipairs(WATCH_PART_NAMES) do
+        local p = reference:FindFirstChild(name, true)
+        if p and p:IsA("BasePart") then
+            refPartSnaps[name] = snapPart(p)
+        end
+    end
+
+    -- John: Case, face, внешность
+    local debris = reference:FindFirstChild("Debris")
+    if debris then
+        local john = debris:FindFirstChild("John")
+        if john then
+            -- Case
+            local case = john:FindFirstChild("Case")
+            if case then refCaseSnap = snapModel(case) end
+            -- Face декаль
+            local head = john:FindFirstChild("Head")
+            if head then
+                local face = head:FindFirstChild("face")
+                          or head:FindFirstChildOfClass("Decal")
+                if face and face:IsA("Decal") then
+                    refFaceSnap = { Texture = face.Texture }
+                end
+            end
+            -- Внешность (костюм, цвет тела)
+            refNPCSnap = snapNPCAppearance(john)
         end
     end
 end
 
--- Запоминаем, какие имена есть в каждой spawn-папке у Segment000
-local refSpawnNames = {}    -- refSpawnNames["PuddleSpawn"]["Part1"] = true
+buildSnapshots()
+
+-- Запоминаем детей spawn-папок из Segment000, чтобы не считать их аномалией
+-- (в 000 PuddleSpawn уже содержит Part1-Part5, ShadowSpawn — Part1-Part2)
+local refSpawnChildren = {}   -- refSpawnChildren["PuddleSpawn"] = { Part1=true, ... }
 do
     local refRefs = reference:FindFirstChild("References")
     if refRefs then
-        for _, folderName in ipairs(SPAWN_FOLDERS) do
-            refSpawnNames[folderName] = {}
-            local folder = refRefs:FindFirstChild(folderName)
+        for _, fn in ipairs(SPAWN_FOLDERS) do
+            refSpawnChildren[fn] = {}
+            local folder = refRefs:FindFirstChild(fn)
             if folder then
                 for _, c in ipairs(folder:GetChildren()) do
-                    refSpawnNames[folderName][c.Name] = true
+                    refSpawnChildren[fn][c.Name] = true
                 end
             end
         end
@@ -85,6 +236,7 @@ do
 end
 
 -- ── GUI ────────────────────────────────────────────────────────
+
 local function buildGui()
     local pg  = player:WaitForChild("PlayerGui")
     local old = pg:FindFirstChild("AnomalyHUD")
@@ -98,47 +250,50 @@ local function buildGui()
 
     local frame = Instance.new("Frame")
     frame.Name                   = "Panel"
-    frame.Size                   = UDim2.new(0, 280, 0, 80)
-    frame.Position               = UDim2.new(1, -295, 1, -95)
+    frame.Size                   = UDim2.new(0, 280, 0, 100)
+    frame.Position               = UDim2.new(1, -295, 1, -115)
     frame.BackgroundColor3       = Color3.fromRGB(6, 6, 10)
     frame.BackgroundTransparency = 0.18
     frame.BorderSizePixel        = 0
     frame.Parent                 = sg
 
-    local corner = Instance.new("UICorner", frame)
+    local corner   = Instance.new("UICorner", frame)
     corner.CornerRadius = UDim.new(0, 8)
 
-    local stroke = Instance.new("UIStroke", frame)
-    stroke.Color     = Color3.fromRGB(190, 25, 25)
+    local stroke   = Instance.new("UIStroke", frame)
+    stroke.Color   = Color3.fromRGB(190, 25, 25)
     stroke.Thickness = 1.5
 
     local function lbl(name, y, color, text, bold)
         local l = Instance.new("TextLabel", frame)
-        l.Name                   = name
-        l.Size                   = UDim2.new(1, -16, 0, 18)
-        l.Position               = UDim2.new(0, 10, 0, y)
-        l.BackgroundTransparency = 1
-        l.TextColor3             = color
-        l.TextSize               = 12
-        l.Font                   = bold and Enum.Font.GothamBold or Enum.Font.Gotham
-        l.TextXAlignment         = Enum.TextXAlignment.Left
-        l.Text                   = text
+        l.Name                  = name
+        l.Size                  = UDim2.new(1, -16, 0, 18)
+        l.Position              = UDim2.new(0, 10, 0, y)
+        l.BackgroundTransparency= 1
+        l.TextColor3            = color
+        l.TextSize              = 12
+        l.Font                  = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+        l.TextXAlignment        = Enum.TextXAlignment.Left
+        l.Text                  = text
         return l
     end
 
-    lbl("Title",    6,  Color3.fromRGB(220, 55, 55),  "⚠  ANOMALY DETECTOR", true)
-    lbl("SegLabel", 30, Color3.fromRGB(195, 195, 195), "Сегмент: —",          false)
-    lbl("CntLabel", 52, Color3.fromRGB(195, 195, 195), "Аномалий: 0",         false)
+    lbl("Title",    6,  Color3.fromRGB(220,55,55),   "⚠  ANOMALY DETECTOR", true)
+    lbl("SegLabel", 30, Color3.fromRGB(195,195,195),  "Сегмент: —",          false)
+    lbl("CntLabel", 52, Color3.fromRGB(195,195,195),  "Аномалий: 0",         false)
+    lbl("MisLabel", 74, Color3.fromRGB(255,165,50),   "",                    false)
 
     return sg
 end
 
-local gui      = buildGui()
-local panel    = gui:WaitForChild("Panel")
-local segLabel = panel:WaitForChild("SegLabel")
-local cntLabel = panel:WaitForChild("CntLabel")
+local gui       = buildGui()
+local panel     = gui:WaitForChild("Panel")
+local segLabel  = panel:WaitForChild("SegLabel")
+local cntLabel  = panel:WaitForChild("CntLabel")
+local misLabel  = panel:WaitForChild("MisLabel")
 
 -- ── Утилиты ────────────────────────────────────────────────────
+
 local function getSegPos(seg)
     if seg.PrimaryPart then return seg.PrimaryPart.Position end
     for _, v in ipairs(seg:GetDescendants()) do
@@ -154,7 +309,7 @@ local function getNearestSeg()
     if not root then return nil end
     local best, bestD = nil, math.huge
     for _, seg in ipairs(mapSegments:GetChildren()) do
-        if seg:IsA("Model") and seg.Name ~= "Start" then
+        if seg:IsA("Model") and not IGNORE_SEGMENTS[seg.Name] then
             local d = (root.Position - getSegPos(seg)).Magnitude
             if d < bestD then best, bestD = seg, d end
         end
@@ -162,45 +317,29 @@ local function getNearestSeg()
     return best
 end
 
--- ── Подсветка ──────────────────────────────────────────────────
--- Highlight работает только с BasePart и Model.
--- Для остальных типов поднимаемся к ближайшему подходящему предку.
-local function findTarget(obj)
-    if obj:IsA("BasePart") or obj:IsA("Model") then return obj end
-    -- Есть потомки-BasePart?
-    for _, d in ipairs(obj:GetDescendants()) do
-        if d:IsA("BasePart") then return d end
-    end
-    -- Поднимаемся
-    local p = obj.Parent
-    while p and p ~= mapSegments do
-        if p:IsA("BasePart") or p:IsA("Model") then return p end
-        p = p.Parent
-    end
-    return nil
-end
-
+-- Подсветка: НЕ ставится на полностью прозрачные BasePart-ы
 local function addHighlight(obj)
-    local target = findTarget(obj)
-    if not target then return end
-
-    if target:IsA("BasePart") and target.Transparency >= 1 then return end
-    if target:IsA("Model") then
-        local vis = false
-        for _, p in ipairs(target:GetDescendants()) do
-            if p:IsA("BasePart") and p.Transparency < 1 then vis = true; break end
+    -- Для BasePart — пропускаем невидимые части
+    if obj:IsA("BasePart") and obj.Transparency >= 1 then return end
+    -- Для Model — пропускаем если все части прозрачны
+    if obj:IsA("Model") then
+        local hasVisible = false
+        for _, p in ipairs(obj:GetDescendants()) do
+            if p:IsA("BasePart") and p.Transparency < 1 then
+                hasVisible = true
+                break
+            end
         end
-        if not vis then return end
+        if not hasVisible then return end
     end
-
-    if target:FindFirstChildOfClass("Highlight") then return end
-    local h               = Instance.new("Highlight")
-    h.FillColor           = HIGHLIGHT_COLOR
-    h.OutlineColor        = HIGHLIGHT_COLOR
-    h.FillTransparency    = 0.55
-    h.OutlineTransparency = 0
-    h.Adornee             = target
-    h.Parent              = target
+    if obj:FindFirstChildOfClass("Highlight") then return end
+    local h              = Instance.new("Highlight")
+    h.FillColor          = HIGHLIGHT_COLOR
+    h.OutlineColor       = HIGHLIGHT_COLOR
+    h.FillTransparency   = 0.55
+    h.OutlineTransparency= 0
+    h.Adornee            = obj
+    h.Parent             = obj
 end
 
 local function clearHighlights(seg)
@@ -210,52 +349,99 @@ local function clearHighlights(seg)
 end
 
 -- ── Сканирование ───────────────────────────────────────────────
+
 local function scanSeg(seg)
-    local anomObjs = {}
+    local flagged = {}   -- объекты для подсветки
+    local missing = {}   -- имена пропавших обязательных объектов
 
-    local debris = seg:FindFirstChild("Debris")
-
-    -- ① Объекты из чёрного списка ANOMALY_NAMES
-    --    Ищем везде в сегменте, кроме папки Debris (там John — NPC, не трогаем)
+    -- ① Глубокий поиск: объекты из чёрного списка
+    --    (NPC John и AnomalyCounter пропускаем)
     for _, obj in ipairs(seg:GetDescendants()) do
-        if ANOMALY_NAMES[obj.Name] then
-            if not (debris and obj:IsDescendantOf(debris)) then
-                table.insert(anomObjs, obj)
+        local n = obj.Name
+        if n ~= "John" and n ~= "AnomalyCounter" then
+            if ANOMALY_ON_APPEAR[n] then
+                table.insert(flagged, obj)
             end
         end
     end
 
-    -- ② Objects/ — лишние объекты сверх эталона
-    --    (ExtraCamera1, ExtraCamera2 попадают сюда автоматически)
-    local objFolder = seg:FindFirstChild("Objects")
-    if objFolder then
-        for _, c in ipairs(objFolder:GetChildren()) do
-            if not refObjectNames[c.Name] then
-                table.insert(anomObjs, c)
-            end
-        end
-    end
-
-    -- ③ References/PuddleSpawn и ShadowSpawn — лишние дети сверх эталона
+    -- ② Spawn-папки: дети, которых не было в Segment000 = аномалия
     local refs = seg:FindFirstChild("References")
     if refs then
-        for _, folderName in ipairs(SPAWN_FOLDERS) do
-            local folder    = refs:FindFirstChild(folderName)
-            local refNames  = refSpawnNames[folderName] or {}
+        for _, fn in ipairs(SPAWN_FOLDERS) do
+            local folder = refs:FindFirstChild(fn)
             if folder then
-                for _, c in ipairs(folder:GetChildren()) do
-                    if not refNames[c.Name] then
-                        table.insert(anomObjs, c)
+                local refChildren = refSpawnChildren[fn] or {}
+                for _, child in ipairs(folder:GetChildren()) do
+                    if not refChildren[child.Name] then
+                        table.insert(flagged, child)
                     end
                 end
             end
         end
     end
 
-    return anomObjs
+    -- ③ Обязательные объекты: отсутствие = аномалия
+    for _, name in ipairs(REQUIRED_OBJECTS) do
+        if not seg:FindFirstChild(name, true) then
+            table.insert(missing, name)
+        end
+    end
+
+    -- ④ Наблюдаемые парты: изменение ЦВЕТА = аномалия
+    for _, name in ipairs(WATCH_PART_NAMES) do
+        local snap = refPartSnaps[name]
+        if snap then
+            local part = seg:FindFirstChild(name, true)
+            if part and part:IsA("BasePart") and partColorChanged(part, snap) then
+                table.insert(flagged, part)
+            end
+        end
+    end
+
+    -- ⑤ John → Case: изменение = аномалия (подсвечиваем Case, не John)
+    local debris = seg:FindFirstChild("Debris")
+    if debris then
+        local john = debris:FindFirstChild("John")
+        if john then
+
+            -- Case
+            if refCaseSnap then
+                local case = john:FindFirstChild("Case")
+                if case and modelChanged(case, refCaseSnap) then
+                    table.insert(flagged, case)
+                end
+            end
+
+            -- Face декаль
+            if refFaceSnap then
+                local head = john:FindFirstChild("Head")
+                if head then
+                    local face = head:FindFirstChild("face")
+                              or head:FindFirstChildOfClass("Decal")
+                    if face and face:IsA("Decal")
+                    and face.Texture ~= refFaceSnap.Texture then
+                        table.insert(flagged, head)
+                    end
+                end
+            end
+
+            -- Костюм / цвет тела
+            if refNPCSnap then
+                local changedPart = npcAppearanceChanged(john, refNPCSnap)
+                if changedPart then
+                    table.insert(flagged, changedPart)
+                end
+            end
+
+        end
+    end
+
+    return flagged, missing
 end
 
 -- ── Главный цикл ───────────────────────────────────────────────
+
 local lastSeg      = nil
 local lastScanTime = 0
 
@@ -269,9 +455,11 @@ RunService.Heartbeat:Connect(function()
     if not seg then
         segLabel.Text = "Сегмент: не найден"
         cntLabel.Text = "Аномалий: —"
+        misLabel.Text = ""
         return
     end
 
+    -- Сбросить подсветку в старом сегменте при смене зоны
     if lastSeg and lastSeg ~= seg then
         clearHighlights(lastSeg)
     end
@@ -279,25 +467,33 @@ RunService.Heartbeat:Connect(function()
 
     segLabel.Text = "Сегмент: " .. seg.Name
 
-    -- Segment000 — эталон, сканировать нет смысла
+    -- Segment000 — эталон, сканировать не нужно
     if seg == reference then
+        clearHighlights(seg)
         cntLabel.Text       = "Аномалий: 0"
         cntLabel.TextColor3 = Color3.fromRGB(90, 215, 90)
+        misLabel.Text       = ""
         return
     end
 
-    local anomObjs = scanSeg(seg)
+    local anomObjs, missList = scanSeg(seg)
 
+    -- Перерисовать подсветку
     clearHighlights(seg)
     for _, obj in ipairs(anomObjs) do
         addHighlight(obj)
     end
 
-    local total = #anomObjs
-    cntLabel.Text       = "Аномалий: " .. total
+    -- Обновить GUI
+    local total = #anomObjs + #missList
+    cntLabel.Text      = "Аномалий: " .. total
     cntLabel.TextColor3 = total > 0
         and Color3.fromRGB(255, 75, 75)
         or  Color3.fromRGB(90, 215, 90)
+
+    misLabel.Text = #missList > 0
+        and ("Нет: " .. table.concat(missList, ", "))
+        or  ""
 end)
 
-print("[AnomalyDetector v5] Запущен. Интервал:", SCAN_INTERVAL, "сек.")
+print("[AnomalyDetector v3fix] Запущен. Интервал:", SCAN_INTERVAL, "сек.")

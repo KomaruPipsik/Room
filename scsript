@@ -1,127 +1,270 @@
--- ANOMALY DETECTOR v5 — LocalScript
--- Помести в StarterPlayerScripts
---
--- Логика простая:
---   1. При старте запоминаем снапшот Segment000 (путь → цвет, размер, вращение)
---   2. Каждые 1.5 сек смотрим какой сегмент ближайший
---   3. Всё что в нём отличается от Segment000 — подсвечиваем красным
---
--- Пропускаем:
---   • Debris (там John — NPC, меняется в рантайме)
---   • AnomalyCounter (служебный объект)
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
 
-local Players    = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local player     = Players.LocalPlayer
+local player      = Players.LocalPlayer
+local SCAN_RATE   = 1.5
+local HL_COLOR    = Color3.fromRGB(255, 40, 40)
+local ROT_EPS     = 1.0
+local SIZE_EPS    = 0.05
+local POS_EPS     = 0.5
 
-local SCAN_INTERVAL   = 1.5
-local HIGHLIGHT_COLOR = Color3.fromRGB(255, 40, 40)
-local ROT_EPS         = 1.0    -- допуск вращения в градусах
-local SIZE_EPS        = 0.05   -- допуск размера в студах
+local mapSegments = workspace:WaitForChild("MapSegments", 15)
+if not mapSegments then warn("[AD] MapSegments not found") return end
 
--- ── Инициализация ──────────────────────────────────────────────
-local mapSegments = workspace:WaitForChild("MapSegments", 10)
-if not mapSegments then warn("[AD] MapSegments не найден!") return end
+local reference = mapSegments:WaitForChild("Segment000", 15)
+if not reference then warn("[AD] Segment000 not found") return end
 
-local reference = mapSegments:WaitForChild("Segment000", 10)
-if not reference then warn("[AD] Segment000 не найден!") return end
+local WATCHED_OBJECTS = {
+    "BrokenLight","CeilingExitSign","Door1","Door2",
+    "FlowersSign","Frame1","Frame2","Frame3","Frame4",
+    "TrashSign","WallExitSign"
+}
 
--- ── Снапшот ────────────────────────────────────────────────────
--- Путь объекта относительно корня сегмента, например "Objects/Door1"
-local function getPath(obj, root)
-    local parts = {}
-    local cur = obj
-    while cur and cur ~= root do
-        table.insert(parts, 1, cur.Name)
-        cur = cur.Parent
+local EXTRA_OBJECTS = {
+    "Door3","EyeClock","ExtraCamera1","ExtraCamera2",
+    "ArrowSign2","BloodPart","WallDestroyEffect"
+}
+
+local DANGER_REFS = {
+    "SCP096","Stalker","Fog","AnomalyDoor",
+    "Monster","Entity","Shadow","Creature"
+}
+
+local JOHN_FACE      = "rbxassetid://622196409"
+local JOHN_COLOR     = Color3.fromRGB(27, 42, 53)
+local TRASH_COLOR    = Color3.fromRGB(99, 95, 98)
+local CAM_FRAME_SIZE = Vector3.new(0.262, 2.799, 3.416)
+
+local function colorEq(a, b)
+    return math.abs(a.R-b.R)<0.01 and math.abs(a.G-b.G)<0.01 and math.abs(a.B-b.B)<0.01
+end
+local function sizeEq(a, b)
+    return math.abs(a.X-b.X)<=SIZE_EPS and math.abs(a.Y-b.Y)<=SIZE_EPS and math.abs(a.Z-b.Z)<=SIZE_EPS
+end
+local function rotEq(a, b)
+    return math.abs(a.X-b.X)<=ROT_EPS and math.abs(a.Y-b.Y)<=ROT_EPS and math.abs(a.Z-b.Z)<=ROT_EPS
+end
+local function deepFind(parent, name)
+    return parent:FindFirstChild(name) or parent:FindFirstChild(name, true)
+end
+local function firstPart(obj)
+    if obj:IsA("BasePart") then return obj end
+    for _, d in ipairs(obj:GetDescendants()) do
+        if d:IsA("BasePart") then return d end
     end
-    return table.concat(parts, "/")
+    return nil
 end
 
--- Проверяем — находится ли объект внутри папки Debris
-local function inDebris(obj, root)
-    local p = obj.Parent
-    while p and p ~= root do
-        if p.Name == "Debris" then return true end
-        p = p.Parent
-    end
-    return false
-end
+local refSnap = {}
 
--- Строим снапшот: path → { Color?, Size?, Orientation? }
--- Пропускаем Debris (John) и AnomalyCounter
-local function buildSnap(model)
-    local snap = {}
-    for _, obj in ipairs(model:GetDescendants()) do
-        if obj.Name == "AnomalyCounter" then continue end
-        if inDebris(obj, model) then continue end
-
-        local path  = getPath(obj, model)
-        local entry = { exists = true }
-        if obj:IsA("BasePart") then
-            entry.Color       = obj.Color
-            entry.Size        = obj.Size
-            entry.Orientation = obj.Orientation
+local function buildRefSnap()
+    local objFolder = reference:FindFirstChild("Objects")
+    if objFolder then
+        for _, name in ipairs(WATCHED_OBJECTS) do
+            local obj = deepFind(objFolder, name)
+            if obj then
+                local entry = { exists = true }
+                local part = firstPart(obj)
+                if part then
+                    entry.Color       = part.Color
+                    entry.Size        = part.Size
+                    entry.Orientation = part.Orientation
+                    entry.Position    = part.Position
+                end
+                refSnap.objects = refSnap.objects or {}
+                refSnap.objects[name] = entry
+            end
         end
-        snap[path] = entry
+
+        local arrow = deepFind(objFolder, "ArrowSign")
+        if arrow then
+            local p = firstPart(arrow)
+            if p then refSnap.arrowOri = p.Orientation end
+        end
+
+        local trashBin = deepFind(objFolder, "TrashBin") or deepFind(reference, "TrashBin")
+        if trashBin then
+            local p = firstPart(trashBin)
+            if p then refSnap.trashPos = p.Position end
+        else
+            refSnap.trashMissing = true
+        end
     end
-    return snap
+
+    refSnap.vents = {}
+    for _, vname in ipairs({"Vent1","Vent2","Vent1Hidden"}) do
+        refSnap.vents[vname] = deepFind(reference, vname) ~= nil
+    end
 end
 
-local refSnap = buildSnap(reference)
+buildRefSnap()
 
--- ── GUI ────────────────────────────────────────────────────────
+local xrayOn        = false
+local hlOn          = true
+local mouseUnlocked = false
+local xraySaved     = {}
+local activeHL      = {}
+local lastSeg       = nil
+local lastScanTime  = 0
+
 local function buildGui()
-    local pg  = player:WaitForChild("PlayerGui")
-    local old = pg:FindFirstChild("AnomalyHUD")
+    local pg = player:WaitForChild("PlayerGui")
+    local old = pg:FindFirstChild("AnomalyHUD_v6")
     if old then old:Destroy() end
 
     local sg = Instance.new("ScreenGui")
-    sg.Name           = "AnomalyHUD"
-    sg.ResetOnSpawn   = false
-    sg.Parent         = pg
+    sg.Name         = "AnomalyHUD_v6"
+    sg.ResetOnSpawn = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent       = pg
 
     local frame = Instance.new("Frame", sg)
     frame.Name                   = "Panel"
-    frame.Size                   = UDim2.new(0, 260, 0, 80)
-    frame.Position               = UDim2.new(1, -275, 1, -95)
+    frame.Size                   = UDim2.new(0, 290, 0, 420)
+    frame.Position               = UDim2.new(0, 12, 0.5, -210)
     frame.BackgroundColor3       = Color3.fromRGB(6, 6, 10)
-    frame.BackgroundTransparency = 0.2
+    frame.BackgroundTransparency = 0.12
     frame.BorderSizePixel        = 0
 
-    local corner = Instance.new("UICorner", frame)
-    corner.CornerRadius = UDim.new(0, 8)
-    local stroke = Instance.new("UIStroke", frame)
-    stroke.Color     = Color3.fromRGB(180, 20, 20)
-    stroke.Thickness = 1.5
+    local uc = Instance.new("UICorner", frame)
+    uc.CornerRadius = UDim.new(0, 10)
 
-    local function lbl(name, y, color, text, bold)
+    local us = Instance.new("UIStroke", frame)
+    us.Color     = Color3.fromRGB(160, 15, 15)
+    us.Thickness = 1.5
+
+    local function lbl(name, posY, h, text, color, bold, size)
         local l = Instance.new("TextLabel", frame)
         l.Name                   = name
-        l.Size                   = UDim2.new(1, -12, 0, 20)
-        l.Position               = UDim2.new(0, 8, 0, y)
+        l.Size                   = UDim2.new(1, -16, 0, h)
+        l.Position               = UDim2.new(0, 8, 0, posY)
         l.BackgroundTransparency = 1
-        l.TextColor3             = color
-        l.TextSize               = 13
+        l.TextColor3             = color or Color3.fromRGB(200,200,200)
+        l.TextSize               = size or 12
         l.Font                   = bold and Enum.Font.GothamBold or Enum.Font.Gotham
         l.TextXAlignment         = Enum.TextXAlignment.Left
+        l.TextWrapped            = true
         l.Text                   = text
         return l
     end
 
-    lbl("Title",    6,  Color3.fromRGB(220, 50, 50),  "⚠  ANOMALY DETECTOR", true)
-    lbl("SegLabel", 30, Color3.fromRGB(200, 200, 200), "Сегмент: —",          false)
-    lbl("CntLabel", 54, Color3.fromRGB(200, 200, 200), "Аномалий: 0",         false)
+    local function div(posY)
+        local d = Instance.new("Frame", frame)
+        d.Size                   = UDim2.new(1, -16, 0, 1)
+        d.Position               = UDim2.new(0, 8, 0, posY)
+        d.BackgroundColor3       = Color3.fromRGB(130, 15, 15)
+        d.BackgroundTransparency = 0.4
+        d.BorderSizePixel        = 0
+    end
 
-    return sg
+    lbl("Title",   6, 22, "⚠  ANOMALY DETECTOR v6", Color3.fromRGB(215,45,45), true, 14)
+    div(30)
+    local segLbl = lbl("SegLabel",  36, 18, "Сегмент: —",   Color3.fromRGB(200,200,200), false, 12)
+    local cntLbl = lbl("CntLabel",  56, 18, "Аномалий: 0",  Color3.fromRGB(90,215,90),   true,  12)
+    lbl("Keys",    76, 16, "[Z] Рентген   [H] Хайлайт   [M] Мышь",
+        Color3.fromRGB(100,100,110), false, 10)
+    div(96)
+    lbl("ListHdr", 100, 16, "ОБНАРУЖЕНО:", Color3.fromRGB(160,160,160), true, 10)
+
+    local scroll = Instance.new("ScrollingFrame", frame)
+    scroll.Name                  = "List"
+    scroll.Size                  = UDim2.new(1, -16, 1, -124)
+    scroll.Position              = UDim2.new(0, 8, 0, 118)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel       = 0
+    scroll.ScrollBarThickness    = 3
+    scroll.ScrollBarImageColor3  = Color3.fromRGB(180,20,20)
+    scroll.CanvasSize            = UDim2.new(0,0,0,0)
+    scroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.Padding    = UDim.new(0, 3)
+    layout.SortOrder  = Enum.SortOrder.LayoutOrder
+
+    return sg, frame, segLbl, cntLbl, scroll
 end
 
-local gui      = buildGui()
-local panel    = gui.Panel
-local segLabel = panel.SegLabel
-local cntLabel = panel.CntLabel
+local gui, panel, segLabel, cntLabel, listFrame = buildGui()
 
--- ── Утилиты ────────────────────────────────────────────────────
+local function updateList(items)
+    for _, c in ipairs(listFrame:GetChildren()) do
+        if c:IsA("TextLabel") then c:Destroy() end
+    end
+    for i, text in ipairs(items) do
+        local row = Instance.new("TextLabel", listFrame)
+        row.Size                   = UDim2.new(1, 0, 0, 0)
+        row.AutomaticSize          = Enum.AutomaticSize.Y
+        row.BackgroundColor3       = Color3.fromRGB(180,20,20)
+        row.BackgroundTransparency = 0.78
+        row.BorderSizePixel        = 0
+        row.TextColor3             = Color3.fromRGB(255,110,110)
+        row.TextSize               = 11
+        row.Font                   = Enum.Font.Gotham
+        row.TextXAlignment         = Enum.TextXAlignment.Left
+        row.TextWrapped            = true
+        row.Text                   = "• " .. text
+        row.LayoutOrder            = i
+
+        local rc = Instance.new("UICorner", row)
+        rc.CornerRadius = UDim.new(0, 4)
+
+        local pad = Instance.new("UIPadding", row)
+        pad.PaddingLeft   = UDim.new(0, 5)
+        pad.PaddingRight  = UDim.new(0, 5)
+        pad.PaddingTop    = UDim.new(0, 2)
+        pad.PaddingBottom = UDim.new(0, 2)
+    end
+end
+
+local function clearHighlights()
+    for _, h in ipairs(activeHL) do
+        if h and h.Parent then h:Destroy() end
+    end
+    activeHL = {}
+end
+
+local function addHighlight(obj)
+    if not hlOn then return end
+    if not obj then return end
+    local target = nil
+    if obj:IsA("BasePart") or obj:IsA("Model") then
+        target = obj
+    else
+        target = firstPart(obj) or obj.Parent
+    end
+    if not target then return end
+    if target:FindFirstChildOfClass("Highlight") then return end
+    local h               = Instance.new("Highlight")
+    h.FillColor           = HL_COLOR
+    h.OutlineColor        = HL_COLOR
+    h.FillTransparency    = 0.55
+    h.OutlineTransparency = 0
+    h.Adornee             = target
+    h.Parent              = target
+    table.insert(activeHL, h)
+end
+
+local function applyXray(seg, enable)
+    if not seg then return end
+    for _, obj in ipairs(seg:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = obj.Name:lower()
+            if n:find("wall") or n:find("floor") or n:find("ceiling") or n:find("panel") or n:find("tile") then
+                if enable then
+                    xraySaved[obj] = obj.Transparency
+                    obj.Transparency = 0.88
+                else
+                    if xraySaved[obj] ~= nil then
+                        obj.Transparency = xraySaved[obj]
+                    end
+                end
+            end
+        end
+    end
+    if not enable then xraySaved = {} end
+end
+
 local function getSegPos(seg)
     if seg.PrimaryPart then return seg.PrimaryPart.Position end
     for _, v in ipairs(seg:GetDescendants()) do
@@ -135,119 +278,204 @@ local function getNearestSeg()
     if not char then return nil end
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return nil end
-    local best, bestD = nil, math.huge
+    local best, bestDist = nil, math.huge
     for _, seg in ipairs(mapSegments:GetChildren()) do
         if seg:IsA("Model") and seg.Name ~= "Start" then
             local d = (root.Position - getSegPos(seg)).Magnitude
-            if d < bestD then best, bestD = seg, d end
+            if d < bestDist then best, bestDist = seg, d end
         end
     end
     return best
 end
 
--- Подсветка
-local function findTarget(obj)
-    if obj:IsA("BasePart") or obj:IsA("Model") then return obj end
-    for _, d in ipairs(obj:GetDescendants()) do
-        if d:IsA("BasePart") then return d end
-    end
-    local p = obj.Parent
-    while p and p ~= mapSegments do
-        if p:IsA("BasePart") or p:IsA("Model") then return p end
-        p = p.Parent
-    end
-    return nil
-end
-
-local function addHighlight(obj)
-    local t = findTarget(obj)
-    if not t then return end
-    if t:IsA("BasePart") and t.Transparency >= 1 then return end
-    if t:FindFirstChildOfClass("Highlight") then return end
-    local h               = Instance.new("Highlight")
-    h.FillColor           = HIGHLIGHT_COLOR
-    h.OutlineColor        = HIGHLIGHT_COLOR
-    h.FillTransparency    = 0.55
-    h.OutlineTransparency = 0
-    h.Adornee             = t
-    h.Parent              = t
-end
-
-local function clearHighlights(seg)
-    for _, h in ipairs(seg:GetDescendants()) do
-        if h:IsA("Highlight") then h:Destroy() end
-    end
-end
-
--- ── Вспомогательные сравнения ──────────────────────────────────
-local function rotEq(a, b)
-    return math.abs(a.X - b.X) <= ROT_EPS
-       and math.abs(a.Y - b.Y) <= ROT_EPS
-       and math.abs(a.Z - b.Z) <= ROT_EPS
-end
-
-local function sizeEq(a, b)
-    return math.abs(a.X - b.X) <= SIZE_EPS
-       and math.abs(a.Y - b.Y) <= SIZE_EPS
-       and math.abs(a.Z - b.Z) <= SIZE_EPS
-end
-
--- Возвращает объект по пути внутри модели
-local function objByPath(model, path)
-    local cur = model
-    for part in path:gmatch("[^/]+") do
-        cur = cur and cur:FindFirstChild(part)
-    end
-    return cur
-end
-
--- ── Сканирование ───────────────────────────────────────────────
 local function scanSeg(seg)
-    local anomalies    = {}   -- объекты для подсветки
-    local missingCount = 0    -- пропавших объектов (подсветить нельзя — их нет)
+    local descs   = {}
+    local targets = {}
 
-    local curSnap = buildSnap(seg)
+    local function flag(desc, obj)
+        table.insert(descs, desc)
+        if obj then table.insert(targets, obj) end
+    end
 
-    -- Объекты которые ПОЯВИЛИСЬ (нет в 000)
-    for path in pairs(curSnap) do
-        if refSnap[path] == nil then
-            local obj = objByPath(seg, path)
-            if obj then table.insert(anomalies, obj) end
+    local objFolder = seg:FindFirstChild("Objects")
+
+    if objFolder then
+        local snap = refSnap.objects or {}
+        for _, name in ipairs(WATCHED_OBJECTS) do
+            local ref = snap[name]
+            local cur = deepFind(objFolder, name)
+            if ref then
+                if not cur then
+                    flag(name .. ": исчез")
+                else
+                    local part = firstPart(cur)
+                    if part then
+                        if ref.Color and not colorEq(part.Color, ref.Color) then
+                            flag(name .. ": изменён цвет", cur)
+                        end
+                        if ref.Size and not sizeEq(part.Size, ref.Size) then
+                            flag(name .. ": изменён размер", cur)
+                        end
+                        if ref.Orientation and not rotEq(part.Orientation, ref.Orientation) then
+                            flag(name .. ": изменено вращение", cur)
+                        end
+                    end
+                end
+            end
+        end
+
+        for _, name in ipairs(EXTRA_OBJECTS) do
+            local obj = deepFind(objFolder, name)
+            if not obj then obj = deepFind(seg, name) end
+            if obj then
+                flag("Появился объект: " .. name, obj)
+            end
+        end
+
+        local arrow = deepFind(objFolder, "ArrowSign")
+        if arrow and refSnap.arrowOri then
+            local p = firstPart(arrow)
+            if p and not rotEq(p.Orientation, refSnap.arrowOri) then
+                flag("ArrowSign: повёрнут", arrow)
+            end
+        end
+
+        local cf = deepFind(objFolder, "CameraFrame")
+        if cf then
+            local p = firstPart(cf)
+            if p and not sizeEq(p.Size, CAM_FRAME_SIZE) then
+                flag("CameraFrame: изменён размер", cf)
+            end
+        end
+
+        local trashBin = deepFind(objFolder, "TrashBin") or deepFind(seg, "TrashBin")
+        if trashBin then
+            local p = firstPart(trashBin)
+            if p then
+                if not colorEq(p.Color, TRASH_COLOR) then
+                    flag("TrashBin: неправильный цвет", trashBin)
+                end
+                if refSnap.trashPos then
+                    if (p.Position - refSnap.trashPos).Magnitude > POS_EPS then
+                        flag("TrashBin: сдвинута", trashBin)
+                    end
+                end
+            end
+        elseif not refSnap.trashMissing then
+            flag("TrashBin: исчезла")
         end
     end
 
-    -- Объекты которые ИЗМЕНИЛИСЬ (цвет / размер / вращение)
-    for path, cur in pairs(curSnap) do
-        local ref = refSnap[path]
-        if ref and cur.Color then   -- BasePart присутствует в обоих
-            local changed = false
-            if cur.Color ~= ref.Color then changed = true end
-            if not changed and cur.Size        and ref.Size        and not sizeEq(cur.Size, ref.Size)               then changed = true end
-            if not changed and cur.Orientation and ref.Orientation and not rotEq(cur.Orientation, ref.Orientation)  then changed = true end
-            if changed then
-                local obj = objByPath(seg, path)
-                if obj then table.insert(anomalies, obj) end
+    for _, camName in ipairs({"Camera1","Camera2"}) do
+        local cam = deepFind(seg, camName)
+        if cam then
+            local hasAttach = false
+            local hasRed    = false
+            for _, d in ipairs(cam:GetDescendants()) do
+                if d:IsA("Attachment") then hasAttach = true end
+                if d:IsA("BasePart") then
+                    local c = d.Color
+                    if c.R > 0.6 and c.G < 0.25 and c.B < 0.25 then hasRed = true end
+                end
+            end
+            if hasAttach then flag(camName .. ": появился Attachment", cam) end
+            if hasRed    then flag(camName .. ": красный цвет внутри", cam) end
+        end
+    end
+
+    for _, vname in ipairs({"Vent1","Vent2","Vent1Hidden"}) do
+        local vent = deepFind(seg, vname)
+        if refSnap.vents[vname] and not vent then
+            flag(vname .. ": исчез")
+        elseif vent then
+            local water = deepFind(vent, "Water")
+            if water and water:IsA("BasePart") and water.Transparency < 0.8 then
+                flag(vname .. ": видна Water", vent)
             end
         end
     end
 
-    -- Объекты которые ПРОПАЛИ (есть в 000, нет в текущем)
-    for path in pairs(refSnap) do
-        if curSnap[path] == nil then
-            missingCount += 1
+    local refFolder = seg:FindFirstChild("References")
+    if refFolder then
+        for _, spawnName in ipairs({"ShadowSpawn","PuddleSpawn"}) do
+            local sp = refFolder:FindFirstChild(spawnName)
+            if sp then
+                local kids = sp:GetChildren()
+                if #kids > 0 then
+                    flag(spawnName .. ": содержит " .. #kids .. " объект(ов)", sp)
+                end
+            end
+        end
+        for _, dname in ipairs(DANGER_REFS) do
+            local obj = deepFind(refFolder, dname)
+            if obj then flag("References: " .. dname, obj) end
         end
     end
 
-    return anomalies, missingCount
+    local john = deepFind(seg, "John")
+    if john then
+        local hair = deepFind(john, "Hair") or deepFind(john, "HairMesh")
+        if hair then
+            local p = firstPart(hair)
+            if p and not colorEq(p.Color, JOHN_COLOR) then
+                flag("John: неправильный цвет волос", john)
+            end
+        end
+
+        local caseObj = deepFind(john, "Case")
+        if caseObj then
+            local cp = firstPart(caseObj)
+            if cp and not colorEq(cp.Color, JOHN_COLOR) then
+                flag("John: неправильный цвет чемодана", john)
+            end
+
+            local leftArm = john:FindFirstChild("Left Arm") or john:FindFirstChild("LeftHand")
+            if leftArm then
+                local cur = caseObj.Parent
+                local inLeft = false
+                while cur and cur ~= john do
+                    if cur == leftArm then inLeft = true break end
+                    cur = cur.Parent
+                end
+                if inLeft then
+                    flag("John: чемодан в левой руке", john)
+                end
+            end
+        end
+
+        local head = john:FindFirstChild("Head")
+        if head then
+            local face = head:FindFirstChild("face") or head:FindFirstChild("Face")
+            if face and face:IsA("Decal") and face.Texture ~= JOHN_FACE_ID then
+                flag("John: неправильное лицо", john)
+            end
+        end
+    end
+
+    return descs, targets
 end
 
--- ── Главный цикл ───────────────────────────────────────────────
-local lastSeg      = nil
-local lastScanTime = 0
+UserInputService.InputBegan:Connect(function(input, proc)
+    if proc then return end
+    if input.KeyCode == Enum.KeyCode.Z then
+        xrayOn = not xrayOn
+        applyXray(lastSeg, xrayOn)
+    elseif input.KeyCode == Enum.KeyCode.H then
+        hlOn = not hlOn
+        if not hlOn then
+            clearHighlights()
+        end
+    elseif input.KeyCode == Enum.KeyCode.M then
+        mouseUnlocked = not mouseUnlocked
+        UserInputService.MouseBehavior = mouseUnlocked
+            and Enum.MouseBehavior.Default
+            or  Enum.MouseBehavior.LockCenter
+    end
+end)
 
 RunService.Heartbeat:Connect(function()
     local now = tick()
-    if now - lastScanTime < SCAN_INTERVAL then return end
+    if now - lastScanTime < SCAN_RATE then return end
     lastScanTime = now
 
     local seg = getNearestSeg()
@@ -258,32 +486,41 @@ RunService.Heartbeat:Connect(function()
     end
 
     if lastSeg and lastSeg ~= seg then
-        clearHighlights(lastSeg)
+        clearHighlights()
+        if xrayOn then
+            applyXray(lastSeg, false)
+            xrayOn = false
+        end
     end
     lastSeg = seg
 
     segLabel.Text = "Сегмент: " .. seg.Name
 
-    -- Segment000 — эталон, не сканируем
     if seg == reference then
-        clearHighlights(seg)
+        clearHighlights()
         cntLabel.Text       = "Аномалий: 0"
         cntLabel.TextColor3 = Color3.fromRGB(90, 215, 90)
+        updateList({})
         return
     end
 
-    local anomalies, missingCount = scanSeg(seg)
+    local descs, targets = scanSeg(seg)
 
-    clearHighlights(seg)
-    for _, obj in ipairs(anomalies) do
-        addHighlight(obj)
+    clearHighlights()
+    if hlOn then
+        for _, obj in ipairs(targets) do
+            addHighlight(obj)
+        end
     end
 
-    local total = #anomalies + missingCount
+    local total = #descs
     cntLabel.Text       = "Аномалий: " .. total
     cntLabel.TextColor3 = total > 0
         and Color3.fromRGB(255, 75, 75)
         or  Color3.fromRGB(90, 215, 90)
+
+    updateList(descs)
 end)
 
+print("[AnomalyDetector v6] OK")
 print("[AnomalyDetector v5] Запущен.")
